@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>シンプルまるごとZIP</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <img src="../icons/icon48.png" class="logo" alt="">
+    <div class="title-wrap">
+      <div class="title">シンプルまるごとZIP <span class="ver">v1.0.0</span></div>
+      <div class="subtitle">X メディア一括保存</div>
+    </div>
+    <button id="optionsBtn" class="icon-btn" title="設定">⚙</button>
+  </header>
+
+  <section class="panel target-panel">
+    <div class="target-line">
+      <span class="section-title inline-title">対象ユーザー</span>
+      <span id="targetHandle" class="handle">—</span>
+    </div>
+    <div id="targetHint" class="hint one-line">Xのプロフィール・メディア・投稿ページを開いてください</div>
+    <div id="collectionModeRow" class="mode-row hidden" role="group" aria-label="収集方法">
+      <span>収集方法</span>
+      <label><input name="collectionMode" type="radio" value="auto"> 自動</label>
+      <label><input name="collectionMode" type="radio" value="manual" checked> 手動</label>
+      <span class="mode-note">手動時はXの画面をスクロール</span>
+    </div>
+  </section>
+
+  <div class="collect-row">
+    <button id="collectBtn" class="btn btn-blue">メディアを収集</button>
+    <button id="stopCollectBtn" class="btn btn-stop" disabled>停止</button>
+  </div>
+
+  <section id="statusPanel" class="panel status-panel" title="">
+    <div class="status-head">
+      <strong id="statusTitle">準備中…</strong>
+      <span id="statusPercent"></span>
+    </div>
+    <div id="statusDetail" class="status-detail">現在の状態を確認しています</div>
+    <div id="progressTrack" class="progress-track hidden">
+      <div id="progressBar" class="progress-bar"></div>
+    </div>
+    <div id="resumeRow" class="resume-row hidden">
+      <button id="restartBtn" class="mini-btn">進捗をリセット</button>
+      <button id="newOnlyBtn" class="mini-btn delta-btn hidden" title="前回の収集位置までを確認し、新しく追加されたメディアだけを取得">新規分をチェック</button>
+    </div>
+    <div id="confirmRow" class="confirm-row hidden">
+      <button id="confirmCancelBtn" class="mini-btn confirm-cancel">キャンセル</button>
+      <button id="confirmActionBtn" class="mini-btn primary confirm-action">続ける</button>
+    </div>
+  </section>
+
+  <div class="count-row">
+    <div class="count-card"><span>画像</span><strong id="imageCount">0</strong></div>
+    <div class="count-card"><span>動画</span><strong id="videoCount">0</strong><small>GIF含む</small></div>
+  </div>
+
+  <section class="panel compact-panel">
+    <div class="setting-line">
+      <span class="section-title inline-title">取得するメディア</span>
+      <div class="checks">
+        <label><input id="includeImages" type="checkbox" checked> 画像</label>
+        <label><input id="includeVideos" type="checkbox" checked> 動画</label>
+      </div>
+    </div>
+    <div class="hint one-line">画像は原寸を優先。動画にはアニメーションGIFを含みます。</div>
+  </section>
+
+  <section class="panel compact-panel split-panel">
+    <div class="section-title">ZIP分割</div>
+    <div class="radios split-radios">
+      <label><input type="radio" name="split" value="auto" checked> 自動</label>
+      <label><input type="radio" name="split" value="500mb"> 500 MB</label>
+      <label><input type="radio" name="split" value="1gb"> 1 GB</label>
+      <label><input type="radio" name="split" value="500files"> 500ファイル</label>
+    </div>
+    <div class="hint one-line">自動は300 MBまたは300ファイルの先に達した条件で分割。</div>
+  </section>
+
+  <section class="panel compact-panel debug-panel">
+    <div class="section-title">ダウンロードファイル数</div>
+    <div class="radios debug-radios">
+      <label><input type="radio" name="downloadLimit" value="5" checked> 5ファイル <span class="debug-badge">動作確認</span></label>
+      <label><input type="radio" name="downloadLimit" value="all"> 無制限</label>
+    </div>
+    <div class="hint one-line">初回の動作確認向け。選択した設定は次回も記憶します。</div>
+  </section>
+
+  <div class="zip-row">
+    <button id="zipBtn" class="btn btn-green" disabled>ZIPで保存</button>
+    <button id="stopZipBtn" class="btn btn-stop" disabled>中止</button>
+  </div>
+
+  <div id="notice" class="notice hidden"></div>
+
+  <script src="../archive/fs-access.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

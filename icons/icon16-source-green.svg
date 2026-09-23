@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+ <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#43bf69"/><stop offset="1" stop-color="#16893a"/></linearGradient></defs>
+ <rect width="16" height="16" rx="3" fill="url(#bg)"/>
+ <!-- top media silhouettes -->
+ <path fill="white" d="M1.4 4.3l4.2-1 1 3.9-4.2 1z M10.0 3.1l4.4 1-.9 3.9-4.4-1z"/>
+ <path fill="#16893a" d="M2.5 6.9l1.1-1.8.6.7.6-.8 1.2 1.8zM11 4.6v2.2l2-1.1z"/>
+ <!-- large download arrow, visually in front of the media -->
+ <path fill="white" stroke="#43bf69" stroke-width=".65" stroke-linejoin="round" d="M7.0 1.2h2v5.0h1.5L8 8.9 5.5 6.2H7z"/>
+ <!-- ZIP container and zipper tooth motif -->
+ <rect x="2.7" y="9.1" width="10.7" height="5.9" rx="1.2" fill="white"/>
+ <text x="3.7" y="13.35" fill="#16893a" font-family="Arial,sans-serif" font-weight="900" font-size="3.45" letter-spacing="-.2">ZIP</text>
+ <path fill="#16893a" d="M10.8 9.2h1.1v1h-.5v.5h.5v.9h-.5v.5h.5v.9h-.5v.4h.5v1.4h-1.1z"/>
+ </svg>

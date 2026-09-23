@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local test / generated artifacts
+*.zip
+*.crx
+*.pem
+*.log
+coverage/
+dist/
+build/
+
+# Local secrets / tokens / cookies
+.env
+.env.*
+*.secret
+*.secrets
+cookies.txt
+*token*.txt

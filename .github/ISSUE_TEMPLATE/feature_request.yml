@@ -1,0 +1,23 @@
+name: Feature request
+description: 機能追加・改善提案
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 解決したいこと
+      description: どんな不便を解消したいかを書いてください。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案内容
+    validations:
+      required: true
+  - type: textarea
+    id: ui
+    attributes:
+      label: UIへの影響
+      description: ポップアップ1画面での操作性を維持できる案があれば記入してください。

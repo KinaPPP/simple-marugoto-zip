@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>シンプルまるごとZIP - 設定</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <img src="../icons/icon48.png" width="48" height="48" alt="" class="app-icon">
+      <div><h1>シンプルまるごとZIP <span>v1.0.0</span></h1><p>設定・バックアップ</p></div>
+    </header>
+
+    <section class="backup" aria-labelledby="backupTitle">
+      <h2 id="backupTitle">バックアップと復元</h2>
+      <div class="backup-grid">
+        <div class="backup-panel export-panel">
+          <h3>全体JSONを保存</h3>
+          <button class="primary" id="exportBackupBtn" type="button">JSONをエクスポート</button>
+          <p class="feedback" id="exportFeedback" role="status" aria-live="polite"></p>
+        </div>
+        <div class="backup-panel import-panel">
+          <h3>ZIP／JSONから復元</h3>
+          <div class="drop-target" id="backupDropZone" tabindex="0" role="button" aria-label="ZIPまたはJSONを読み込む">
+            <strong>ZIP／JSONをここにドロップ</strong>
+            <span>またはクリックして選択</span>
+          </div>
+          <input type="file" accept=".zip,.json,application/zip,application/json" id="backupFileInput" hidden>
+        </div>
+      </div>
+      <p id="importFeedback" class="feedback" role="status" aria-live="polite"></p>
+      <div class="import-result" id="importResult" hidden>
+        <div class="result-head"><span class="result-check" aria-hidden="true">✓</span>
+          <div><strong id="importResultText">復元しました</strong><small id="importSourceText"></small></div>
+        </div>
+        <button class="subtle" id="replaceAccountsBtn" type="button" hidden>同じアカウントを上書き</button>
+        <details class="import-advanced" id="importAdvanced">
+          <summary>詳細な復元操作</summary>
+          <div id="importAccounts" class="account-preview"></div>
+          <p id="importWarning" class="import-warning" hidden></p>
+          <button id="replaceAllBtn" class="danger-outline" type="button" hidden>このJSONで全体を置き換える</button>
+        </details>
+        <div class="inline-confirm" id="importConfirmBox" hidden>
+          <strong id="importConfirmText">現在の状態を置き換えますか？</strong>
+          <div class="confirm-actions"><button type="button" id="cancelImportBtn" class="secondary">いいえ</button>
+          <button type="button" id="applyImportBtn" class="danger">はい、置き換える</button></div>
+        </div>
+      </div>
+      <div class="help-link"><a href="../README.md" target="_blank" rel="noopener">詳しい仕様はREADMEへ ↗</a></div>
+    </section>
+
+    <details class="more-section" id="supportedServices">
+      <summary>対応サービス</summary>
+      <div class="service-row"><strong>X</strong><span>対応中・Chromeのログインを利用</span></div>
+      <div class="service-row"><strong>Bluesky / Threads</strong><span>将来対応予定</span></div>
+    </details>
+
+    <section class="reset-section" aria-labelledby="resetTitle">
+      <h2 id="resetTitle">データの初期化</h2>
+      <div class="reset-row"><p>シンプルまるごとZIPの拡張データを削除します。</p>
+        <button class="danger-outline" id="resetAllBtn" type="button">すべて削除</button></div>
+      <div id="resetConfirmBox" class="inline-confirm reset-confirm" hidden>
+        <strong>本当に削除しますか？</strong>
+        <p>収集・ZIP進捗、設定、保存先の記憶を初期化します。PCに保存したZIP・JSONは残ります。</p>
+        <div class="confirm-actions"><button id="cancelResetBtn" type="button" class="secondary">いいえ</button>
+          <button id="applyResetBtn" type="button" class="danger">はい、削除する</button></div>
+      </div>
+      <p id="resetFeedback" class="feedback" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="../backup/schema.js"></script>
+  <script src="../backup/zip-reader.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

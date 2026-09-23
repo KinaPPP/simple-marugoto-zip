@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "シンプルまるごとZIP",
+  "short_name": "まるごとZIP",
+  "version": "1.0.0",
+  "description": "SNSのユーザー投稿メディアをまとめて収集し、画像・動画を整理したZIPで保存します。自動/手動収集、差分収集、状態バックアップ・復元に対応します。",
+  "permissions": [
+    "storage",
+    "downloads",
+    "alarms",
+    "offscreen",
+    "tabs",
+    "scripting",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "https://pbs.twimg.com/*",
+    "https://video.twimg.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "シンプルまるごとZIP",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "providers/x/main-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "providers/x/content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

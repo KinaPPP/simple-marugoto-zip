@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+ <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#43bf69"/><stop offset="1" stop-color="#16893a"/></linearGradient></defs>
+ <rect x="1" y="1" width="126" height="126" rx="24" fill="url(#bg)"/>
+ <!-- Large photo glyph: broad strokes and minimal interior detail -->
+ <g transform="rotate(-12 33 44)"><rect x="12" y="26" width="43" height="34" rx="5" fill="white"/>
+  <circle cx="44" cy="35" r="4" fill="#16893a"/><path fill="#16893a" d="M17 51l11-14 8 10 7-7 8 11z"/></g>
+ <!-- Movie frame glyph: no micro-spokes or complex detailing -->
+ <g transform="rotate(12 94 44)"><rect x="75" y="27" width="42" height="35" rx="5" fill="white"/>
+  <path fill="#16893a" d="M79 31h4v4h-4zm0 9h4v4h-4zm0 9h4v4h-4zm30-18h4v4h-4zm0 9h4v4h-4zm0 9h4v4h-4zM89 35v19l15-9.5z"/></g>
+ <!-- Arrow overlaps both media cards and is separated from them with a blue outline -->
+ <path fill="white" stroke="#43bf69" stroke-width="3.8" stroke-linejoin="round" d="M57 15a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v35h8a5 5 0 0 1 3.7 8.4l-15 17a5 5 0 0 1-7.4 0l-15-17A5 5 0 0 1 49 50h8z"/>
+ <!-- Box is the visual anchor; front face implies closed ZIP folder -->
+ <rect x="23" y="72" width="82" height="47" rx="11" fill="white"/>
+ <path d="M26 72v-1a5 5 0 0 1 5-5h22l5 6" fill="white" stroke="white" stroke-width="4" stroke-linejoin="round"/>
+ <text x="30" y="104.5" fill="#16893a" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" font-size="27" letter-spacing="-1.4">ZIP</text>
+ <path fill="#16893a" d="M85 73h6v7h-3v3h3v6h-3v3h3v6h-3v3h3v6h-3v3h3v5h-6z"/>
+ <path fill="#16893a" d="M88 111a5 5 0 0 1 5 5v2H83v-2a5 5 0 0 1 5-5z"/>
+ </svg>

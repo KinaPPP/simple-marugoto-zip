@@ -1,0 +1,53 @@
+name: Bug report
+description: 不具合・取得失敗・UI崩れの報告
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。Cookie、アクセストークン、パスワードは貼らないでください。
+  - type: input
+    id: version
+    attributes:
+      label: 拡張機能バージョン
+      placeholder: v0.0.11
+    validations:
+      required: true
+  - type: input
+    id: chrome
+    attributes:
+      label: Chromeバージョン
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 対象SNS
+      options:
+        - X (Twitter)
+        - Bluesky
+        - Threads
+        - その他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 可能な範囲で具体的に記入してください。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した動作
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作 / エラーログ
+      description: 認証情報を削除してから貼り付けてください。
+    validations:
+      required: true
