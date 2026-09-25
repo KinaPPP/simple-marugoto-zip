@@ -48,7 +48,7 @@
       const entryLength = 46 + nameLength + extraLength + commentLength;
       if (at + entryLength > central.length) throw new Error('ZIP内のファイル名が壊れています');
       const name = enc.decode(central.subarray(at + 46, at + 46 + nameLength));
-      if (/^[a-z0-9_]{1,30}\/backup-state\.json$/.test(name)) {
+      if (/^[a-z0-9_.-]{1,253}\/backup-state\.json$/.test(name)) {
         if (chosen) throw new Error('ZIP内に状態ファイルが複数あります');
         if (flags & 1 || ![0, 8].includes(method)) throw new Error('暗号化・未対応の圧縮形式です');
         if (compressed > MAX_COMPRESSED || uncompressed > MAX_UNCOMPRESSED) throw new Error('状態ファイルが大きすぎます');

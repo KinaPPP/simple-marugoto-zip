@@ -21,6 +21,45 @@
   } catch {}
 
   const POST_SOURCE = 'simple-marugoto-zip';
+  // X本体の機能フラグを利用する旧UI互換オプション（初期値OFF）。
+  // Reactの内部構造はXが変更する可能性がある。取得できなければ何も変更せず、
+  // 新UIの収集処理へ任せる。Control Panel等との併用時も既存関数をチェーンする。
+  let revertProfileTabs = false;
+  let lastReportedSplit = null;
+  function inspectProfileLayout(forceReport = false) {
+    if (typeof document === 'undefined') return;
+    const root = document.getElementById('react-root');
+    const first = root?.firstElementChild;
+    if (!first) return;
+    const propsKey = Object.keys(first).find((key) => key.startsWith('__reactProps'));
+    const props = propsKey ? first[propsKey]?.children?.props?.children?.props : null;
+    const switches = props?.contextProviderProps?.featureSwitches;
+    if (typeof switches?.isTrue !== 'function') return;
+    if (revertProfileTabs && switches.isTrue.__smzProfileOverride !== true) {
+      const original = switches.isTrue;
+      const wrapper = function (flag, ...args) {
+        if (flag === 'responsive_web_profile_redesign_enabled') return false;
+        return original.call(this, flag, ...args);
+      };
+      wrapper.__smzProfileOverride = true;
+      switches.isTrue = wrapper;
+    }
+    let split;
+    try { split = switches.isTrue('responsive_web_profile_redesign_enabled') === true; }
+    catch { return; }
+    // MAIN world can see the React flag before the isolated content script
+    // installs its listener. Re-send the current layout when collection starts
+    // rather than relying exclusively on the first, possibly lost message.
+    if (forceReport || split !== lastReportedSplit) {
+      lastReportedSplit = split;
+      window.postMessage({ source: 'simple-marugoto-zip', type: 'SMZ_X_PROFILE_LAYOUT', split }, '*');
+    }
+  }
+  // XのReactツリー構築を待つ。設定がOFFならUIの観察のみで、副作用はない。
+  if (typeof setInterval === 'function') {
+    const profileCheck = setInterval(inspectProfileLayout, 500);
+    setTimeout(() => clearInterval(profileCheck), 30000);
+  }
 
   function post(type, payload = {}) {
     window.postMessage({ source: POST_SOURCE, type, ...payload }, '*');
@@ -28,6 +67,11 @@
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.source !== POST_SOURCE) return;
+    if (event.data.type === 'SMZ_X_UI_SETTINGS') {
+      revertProfileTabs = event.data.revertProfileTabs === true;
+      inspectProfileLayout(true);
+      return;
+    }
     if (event.data.type === 'SMZ_X_CONTROL') {
       enabled = !!event.data.enabled;
       targetHandle = String(event.data.handle || '').replace(/^@/, '').toLowerCase();
@@ -40,12 +84,15 @@
         for (const batch of earlyBatches) post('SMZ_X_MEDIA_BATCH', batch);
         earlyBatches.length = 0;
       }
+      inspectProfileLayout(true);
     }
   });
 
   function isRelevantUrl(url) {
     if (!url) return false;
-    return /\/i\/api\/graphql\//.test(url) && /(UserMedia|SearchTimeline|UserTweets)/.test(url);
+    // 新UIでGraphQLのoperation名が変わってもメディア投稿を見落とさない。
+    // 収集対象ユーザーの認証・メディア検査はextractFromTweet側で別途行う。
+    return /\/i\/api\/graphql\//.test(url);
   }
 
   function beginRelevantRequest(requestUrl) {

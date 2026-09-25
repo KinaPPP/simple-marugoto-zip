@@ -10,7 +10,7 @@
   <header class="header">
     <img src="../icons/icon48.png" class="logo" alt="">
     <div class="title-wrap">
-      <div class="title">シンプルまるごとZIP <span class="ver">v1.0.0</span></div>
+      <div class="title">シンプルまるごとZIP <span class="ver">v1.1.1</span></div>
       <div class="subtitle">X メディア一括保存</div>
     </div>
     <button id="optionsBtn" class="icon-btn" title="設定">⚙</button>
@@ -52,6 +52,7 @@
       <button id="confirmCancelBtn" class="mini-btn confirm-cancel">キャンセル</button>
       <button id="confirmActionBtn" class="mini-btn primary confirm-action">続ける</button>
     </div>
+    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
   </section>
 
   <div class="count-row">
@@ -67,7 +68,7 @@
         <label><input id="includeVideos" type="checkbox" checked> 動画</label>
       </div>
     </div>
-    <div class="hint one-line">画像は原寸を優先。動画にはアニメーションGIFを含みます。</div>
+    <div id="mediaHint" class="hint one-line">画像は原寸を優先。動画にはアニメーションGIFを含みます。</div>
   </section>
 
   <section class="panel compact-panel split-panel">
@@ -94,8 +95,6 @@
     <button id="zipBtn" class="btn btn-green" disabled>ZIPで保存</button>
     <button id="stopZipBtn" class="btn btn-stop" disabled>中止</button>
   </div>
-
-  <div id="notice" class="notice hidden"></div>
 
   <script src="../archive/fs-access.js"></script>
   <script src="popup.js"></script>

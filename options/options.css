@@ -67,3 +67,7 @@ button:disabled,.drop-target[aria-disabled="true"] { opacity:.55; cursor:not-all
 .reset-row p { margin:0; color:#777; font-size:12px; }
 .reset-section .feedback { margin-top:9px; }
 @media(max-width:630px) { main { width:calc(100% - 20px); margin:12px auto 22px; } .backup-grid { grid-template-columns:1fr; } .reset-row { align-items:stretch; flex-direction:column; } h1 { font-size:20px; } }
+
+.x-option { display:flex; gap:8px; align-items:flex-start; margin-top:10px; font-size:13px; cursor:pointer; }
+.x-option input { flex:none; margin-top:3px; accent-color:#4a8ce0; }
+#xCompatibilityOptions > .muted { margin:4px 0 10px 23px; line-height:1.6; }

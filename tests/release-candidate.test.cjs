@@ -11,7 +11,7 @@ const manifest = JSON.parse(read('manifest.json'));
 const popup = read('popup/popup.html');
 const options = read('options/options.html');
 const popupCode = read('popup/popup.js');
-assert.equal(manifest.version, '1.0.0');
+assert.equal(manifest.version, '1.1.1');
 assert.match(popup, /name="collectionMode"[^>]*value="manual" checked/);
 assert.doesNotMatch(popup, /name="collectionMode"[^>]*value="auto" checked/);
 assert.doesNotMatch(popup, /name="split"[^>]*value="10files"/);
@@ -24,7 +24,7 @@ vm.runInContext(read('backup/schema.js'), backupVm);
 assert.equal(backupVm.SMZBackup.safeSettings(null).collectionMode, 'manual');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'auto'}).collectionMode,'auto');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'manual'}).collectionMode,'manual');
-console.log('PASS release UI: v1.0.0, new user manual, existing auto retained, no debug/10-file choices');
+console.log('PASS release UI: v1.1.1, new user manual, existing auto retained, no debug/10-file choices');
 
 async function splitTest(total, fileBytes, scaledMB, expectedIndexes) {
   const items = Array.from({length:total},(_,i)=>({
@@ -113,6 +113,15 @@ async function legacyTest() {
   const send=()=>new Promise(resolve=>handler({type:'SMZ_START_ARCHIVE',handle:'demo',
     selection:{images:true,videos:false},splitMode:'auto',runLimit:null,saveMode:'directory'},
     {url:'chrome-extension://mock/popup/popup.html'},resolve));
+  const priorMessages = offscreenMessages.length;
+  // 画像12件だけの状態で動画のみを指定しても保存ジョブを作らない。
+  const emptyResult = await new Promise(resolve => handler({type:'SMZ_START_ARCHIVE',handle:'demo',
+    selection:{images:false,videos:true},splitMode:'auto',runLimit:null,saveMode:'directory'},
+    {url:'chrome-extension://mock/popup/popup.html'},resolve));
+  assert.equal(emptyResult.ok, false);
+  assert.match(emptyResult.error, /選択されたメディアがありません/);
+  assert.equal(offscreenMessages.filter(m=>m.type === "SMZ_OFFSCREEN_START_ARCHIVE").length, 0);
+  assert.equal(store.smz_collection_x_demo.archive.nextItemIndex, 10);
   let result=await send();
   assert(result.ok, result.error);
   assert.equal(offscreenMessages.at(-1).splitMode,'10files');
@@ -130,5 +139,5 @@ async function legacyTest() {
   console.log('PASS auto 300-MB boundary (scaled bytes): second file split, per-ZIP checkpoints');
   await legacyTest();
   console.log('PASS migration: paused v0.0.23 10-file job resumes, completed job uses new auto');
-  console.log('PASS v1.0.0 release offline suite');
+  console.log('PASS v1.1.1 offline release suite');
 })().catch(e=>{console.error(e);process.exitCode=1});

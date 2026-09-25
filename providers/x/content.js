@@ -29,6 +29,42 @@
   let awaitingResponseAfterScroll = false;
   let networkSeenAfterLastScroll = false;
   const inflightRequests = new Set();
+  // X新UIでは /media（動画）と /media?filter=photo（画像）を同じ収集ジョブで巡回。
+  // sessionStorage上の段階は同一タブ内だけに残し、アカウント・ジョブIDが変われば無視する。
+  const UI_SETTINGS_KEY = 'smz_user_settings_v1';
+  const SPLIT_STAGE_KEY = 'smz_x_split_collection_stage';
+  let uiSettings = { xSplitMedia: true, xRevertProfileTabs: false };
+  let splitLayout = null; // Xの実効フラグ。Control Panelによる旧UI化も検出する。
+  let successfulPageResponses = 0;
+  const uiSettingsReady = chrome.storage?.local?.get ? chrome.storage.local.get(UI_SETTINGS_KEY).then((storage) => {
+    const source = storage?.[UI_SETTINGS_KEY] || {};
+    uiSettings = { xSplitMedia: source.xSplitMedia !== false,
+      xRevertProfileTabs: source.xRevertProfileTabs === true };
+    window.postMessage({ source: 'simple-marugoto-zip', type: 'SMZ_X_UI_SETTINGS',
+      revertProfileTabs: uiSettings.xRevertProfileTabs }, '*');
+  }).catch(() => {}) : null;
+
+  function getSplitStage() {
+    try {
+      const v = JSON.parse(sessionStorage.getItem(SPLIT_STAGE_KEY) || 'null');
+      return v?.handle === activeHandle?.toLowerCase() && v?.collectionId === activeCollectionId ? v : null;
+    } catch { return null; }
+  }
+  function saveSplitStage(phase) {
+    if (!activeHandle || !activeCollectionId) return;
+    try {
+      sessionStorage.setItem(SPLIT_STAGE_KEY, JSON.stringify({
+        handle: activeHandle.toLowerCase(), collectionId: activeCollectionId, phase
+      }));
+    } catch {}
+  }
+  function clearSplitStage() {
+    try { sessionStorage.removeItem(SPLIT_STAGE_KEY); } catch {}
+  }
+  function currentRouteIsPhoto() {
+    return /(?:^|[?&])filter=photo(?:&|$)/.test(String(location.search || ''));
+  }
+
 
   // v0.0.17: 一定間隔で盲目的にスクロールするのではなく、
   // X自身のUserMedia等の通信が終わるのを待ってから次へ進む。
@@ -115,6 +151,7 @@
     awaitingResponseAfterScroll = false;
     networkSeenAfterLastScroll = false;
     lastReportedPhase = null;
+    successfulPageResponses = 0;
   }
 
   function stopLocal({ clearMarker = true } = {}) {
@@ -194,7 +231,27 @@
     if (!running || !activeHandle || (collectionMode === 'manual' && !deltaBoundaryReached)) return;
     const handle = activeHandle;
     const collectionId = activeCollectionId;
+    if (uiSettingsReady) await uiSettingsReady;
+    const stage = getSplitStage();
+    // デフォルトの新UIで動画と画像を別々に収集。旧UIと判定できたら二度巡回しない。
+    if (endOfFeed && collectionMode === 'auto' && uiSettings.xSplitMedia &&
+        stage?.phase !== 'photos' && splitLayout !== false) {
+      saveSplitStage('photos');
+      stopLocal({ clearMarker: false });
+      location.href = `https://x.com/${encodeURIComponent(handle)}/media?filter=photo`;
+      return;
+    }
+    // 0件が「正常な空アカウント」なのか「未対応UI」なのかを区別する。
+    // メディア画面から一度も対象GraphQLの正常応答が無い場合、0件完了を出さない。
+    if (endOfFeed && successfulPageResponses === 0 &&
+        (stage?.phase === 'photos' || splitLayout === false || !uiSettings.xSplitMedia)) {
+      stopLocal();
+      await chrome.runtime.sendMessage({ type: 'SMZ_COLLECTION_ERROR', platform: 'x', handle, collectionId,
+        error: 'XのメディアAPI応答を確認できません。Xの画面更新により収集できていない可能性があります。' });
+      return;
+    }
     stopLocal();
+    clearSplitStage();
     await chrome.runtime.sendMessage({ type: 'SMZ_COLLECTION_COMPLETE', platform: 'x', handle, collectionId, endOfFeed });
   }
 
@@ -220,12 +277,15 @@
     if (lastScrollAt) networkSeenAfterLastScroll = true;
     // 解析・DOM更新の直後に次のスクロールを重ねず、少し落ち着く時間を置く。
     scheduleTick(RESPONSE_SETTLE_MS);
-    if (deltaBoundaryReached) scheduleDeltaCompletion();
+    if (deltaBoundaryReached && (collectionMode === 'manual' ? splitLayout !== true : (!uiSettings.xSplitMedia || splitLayout === false))) scheduleDeltaCompletion();
   }
 
   async function tick() {
     if (!running || collectionMode === 'manual') return;
-    if (deltaBaselinePostId && deltaBoundaryReached) {
+    // 新UIの動画側だけで差分境界が見えても、画像側に未収集の新着が残る。
+    // 新UIの差分は両ページの末尾まで確認し、誤った早期完了を避ける。
+    if (deltaBaselinePostId && deltaBoundaryReached &&
+        (!uiSettings.xSplitMedia || splitLayout === false)) {
       scheduleDeltaCompletion();
       return;
     }
@@ -245,7 +305,7 @@
     const now = Date.now();
 
     // X自身がUserMedia等を処理中なら、その通信が終わるまで次のスクロールを送らない。
-    if (inflightRequests.size > 0) {
+    if (inflightRequests.size > 0 || pendingMediaWrites > 0) {
       scheduleTick(PACING_TICK_MS);
       return;
     }
@@ -303,10 +363,14 @@
   }
 
   async function startCollecting(handle, { resetPosition = false, skipLargeWarning = false, mode = 'auto', baselinePostId = null } = {}) {
+    if (uiSettingsReady) await uiSettingsReady;
     activeHandle = handle;
     collectionMode = mode === 'manual' ? 'manual' : 'auto';
     deltaBaselinePostId = /^\d+$/.test(String(baselinePostId || '')) ? String(baselinePostId) : null;
     deltaBoundaryReached = false;
+    if (!getSplitStage() && collectionMode === 'auto') {
+      saveSplitStage(currentRouteIsPhoto() ? 'photos' : 'videos');
+    }
     setSessionMarker(handle);
     running = true;
     resetPacingState();
@@ -328,11 +392,25 @@
   }
 
   async function startOrNavigate(handle, options = {}) {
+    if (uiSettingsReady) await uiSettingsReady;
     const target = parseTarget();
     activeHandle = handle;
     setSessionMarker(handle);
-    if (!target || target.handle.toLowerCase() !== handle.toLowerCase() || !target.isMediaPage) {
-      location.href = `https://x.com/${encodeURIComponent(handle)}/media`;
+    // 新しいジョブだけ動画ページから始める。写真ページでの429再開は現在の段階を保持。
+    if (!options.automatic && options.forceReload && options.collectionMode !== 'manual') {
+      clearSplitStage();
+    }
+    const stage = getSplitStage();
+    // A paused job can resume between the two pages. The stored stage, not the
+    // page the user currently happens to be viewing, is authoritative.
+    const desiredPhase = options.collectionMode !== 'manual' && uiSettings.xSplitMedia
+      ? (stage?.phase === 'photos' ? 'photos' : 'videos') : null;
+    const wrongPhase = desiredPhase === 'photos' ? !currentRouteIsPhoto()
+      : desiredPhase === 'videos' ? currentRouteIsPhoto() : false;
+    if (!target || target.handle.toLowerCase() !== handle.toLowerCase() || !target.isMediaPage || wrongPhase) {
+      if (desiredPhase && !stage) saveSplitStage('videos');
+      location.href = `https://x.com/${encodeURIComponent(handle)}/media` +
+        (desiredPhase === 'photos' ? '?filter=photo' : '');
       return;
     }
 
@@ -369,6 +447,10 @@
 
   window.addEventListener('message', async (event) => {
     if (event.source !== window || event.data?.source !== POST_SOURCE) return;
+    if (event.data.type === 'SMZ_X_PROFILE_LAYOUT') {
+      splitLayout = event.data.split === true;
+      return;
+    }
     if (!activeHandle) return;
 
     if (event.data.type === 'SMZ_X_REQUEST_START') {
@@ -377,6 +459,8 @@
     }
 
     if (event.data.type === 'SMZ_X_REQUEST_END') {
+      if (running && Number(event.data.status) >= 200 && Number(event.data.status) < 300 &&
+          /(Media|Video|Photo|SearchTimeline|UserTweets)/i.test(String(event.data.requestUrl || ''))) successfulPageResponses++;
       noteRequestEnd(event.data.requestId);
       return;
     }
@@ -385,6 +469,7 @@
       if (!running) return;
       const items = Array.isArray(event.data.items) ? event.data.items : [];
       if (!items.length) return;
+      successfulPageResponses = Math.max(1, successfulPageResponses);
       pendingMediaWrites++;
       try {
         const result = await chrome.runtime.sendMessage({
@@ -405,7 +490,7 @@
         }
       } catch {} finally {
         pendingMediaWrites = Math.max(0, pendingMediaWrites - 1);
-        if (deltaBoundaryReached) scheduleDeltaCompletion();
+        if (deltaBoundaryReached && (collectionMode === 'manual' ? splitLayout !== true : (!uiSettings.xSplitMedia || splitLayout === false))) scheduleDeltaCompletion();
       }
       return;
     }
@@ -524,9 +609,11 @@
     });
     if (result?.state?.status === 'collecting' && result.isCollectionTab !== false) {
       activeCollectionId = result.state.collectionId || null;
+      activeHandle = target.handle;
+      const continuePhotos = getSplitStage()?.phase === 'photos';
       await startCollecting(target.handle, {
         resetPosition: true,
-        skipLargeWarning: false,
+        skipLargeWarning: continuePhotos,
         mode: result.state.collectionMode,
         baselinePostId: result.state.deltaBaselinePostId
       });

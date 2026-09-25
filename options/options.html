@@ -10,7 +10,7 @@
   <main>
     <header class="page-header">
       <img src="../icons/icon48.png" width="48" height="48" alt="" class="app-icon">
-      <div><h1>シンプルまるごとZIP <span>v1.0.0</span></h1><p>設定・バックアップ</p></div>
+      <div><h1>シンプルまるごとZIP <span>v1.1.1</span></h1><p>設定・バックアップ</p></div>
     </header>
 
     <section class="backup" aria-labelledby="backupTitle">
@@ -51,10 +51,24 @@
       <div class="help-link"><a href="../README.md" target="_blank" rel="noopener">詳しい仕様はREADMEへ ↗</a></div>
     </section>
 
+    <details class="more-section" id="xCompatibilityOptions">
+      <summary>Xの新旧メディア表示（詳細設定）</summary>
+      <label class="x-option"><input type="checkbox" id="xSplitMedia" checked>
+        画像／動画に分かれた新UIから収集する（推奨）
+      </label>
+      <p class="muted">自動収集では動画と画像を順番に確認して、同一アカウントへまとめます。手動収集では必要なページを手動で切り替えてください。</p>
+      <label class="x-option"><input type="checkbox" id="xRevertProfileTabs">
+        Xのプロフィールタブを旧表示に戻す（通常OFF）
+      </label>
+      <p class="muted">X本体の画面表示にも影響します。切り替えた場合はXのページを再読み込みしてください。Control Panel for Twitterの同種設定を使っている場合はOFFのままで構いません。</p>
+      <p class="feedback" id="xOptionsFeedback" role="status" aria-live="polite"></p>
+    </details>
+
     <details class="more-section" id="supportedServices">
       <summary>対応サービス</summary>
       <div class="service-row"><strong>X</strong><span>対応中・Chromeのログインを利用</span></div>
-      <div class="service-row"><strong>Bluesky / Threads</strong><span>将来対応予定</span></div>
+      <div class="service-row"><strong>Bluesky</strong><span>公開API対応／ログイン不要</span></div>
+      <div class="service-row"><strong>Threads</strong><span>将来対応予定</span></div>
     </details>
 
     <section class="reset-section" aria-labelledby="resetTitle">

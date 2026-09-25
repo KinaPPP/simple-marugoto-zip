@@ -8,9 +8,9 @@
   const MAX_ITEMS = 120000;
   const MAX_ACCOUNTS = 1000;
   const MAX_JSON_CHARS = 128 * 1024 * 1024;
-  const itemFields = ['postedAt', 'extension', 'sourceType'];
+  const itemFields = ['postedAt', 'extension', 'sourceType', 'cid'];
   const stateStringFields = ['collectionId', 'collectionMode', 'status', 'pauseReason', 'collectionPhase',
-    'newestPostId', 'oldestPostId', 'deltaBaselinePostId', 'deltaEndReason'];
+    'newestPostId', 'oldestPostId', 'deltaBaselinePostId', 'deltaEndReason', 'resumeCursor'];
   const stateNumFields = ['schemaVersion', 'startedAt', 'updatedAt', 'completedAt', 'displayMediaCount',
     'deltaBaselineCollectedAt', 'lastNewCheckAt', 'lastNewCheckResult'];
   const archiveStringFields = ['status','splitMode','mediaKind','saveMode',
@@ -24,11 +24,35 @@
   function positiveInt(v, fallback = 0) {
     return Number.isSafeInteger(v) && v >= 0 ? v : fallback;
   }
-  function safeMediaUrl(input) {
+  function safePdsOrigin(input) {
+    if (typeof input !== 'string' || input.length > 255) return null;
+    try {
+      const u = new URL(input);
+      if (u.protocol !== 'https:' || u.username || u.password || u.port || u.pathname !== '/' || u.search || u.hash) return null;
+      if (!/^[a-z0-9.-]+$/i.test(u.hostname) || u.hostname === 'localhost' ||
+          /\.(?:local|localhost|internal|test|invalid)$/.test(u.hostname) ||
+          /^(?:0|10|127|169\.254|192\.168|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7]))\./.test(u.hostname)) return null;
+      return u.origin;
+    } catch { return null; }
+  }
+  function safeMediaUrl(input, platform = 'x') {
     if (typeof input !== 'string' || input.length > 4096) return null;
     try {
       const url = new URL(input);
-      if (url.protocol !== 'https:' || !['pbs.twimg.com','video.twimg.com'].includes(url.hostname.toLowerCase())) return null;
+      if (url.protocol !== 'https:' || url.username || url.password) return null;
+      if (platform === 'bluesky') {
+        if (url.hostname.toLowerCase() === 'cdn.bsky.app' && /^\/img\//.test(url.pathname)) {
+          return `${url.origin}${url.pathname}`;
+        }
+        if (url.pathname !== '/xrpc/com.atproto.sync.getBlob' || url.searchParams.size !== 2) return null;
+        if (!safePdsOrigin(url.origin) || !/^did:(?:plc:[a-z2-7]{24}|web:[a-z0-9.:%_-]+)$/i.test(String(url.searchParams.get('did') || '')) ||
+            !/^[a-zA-Z0-9]{20,150}$/.test(String(url.searchParams.get('cid') || ''))) return null;
+        const clean = new URL(`${url.origin}${url.pathname}`);
+        clean.searchParams.set('did', url.searchParams.get('did'));
+        clean.searchParams.set('cid', url.searchParams.get('cid'));
+        return clean.toString();
+      }
+      if (!['pbs.twimg.com','video.twimg.com'].includes(url.hostname.toLowerCase())) return null;
       // 認証付きURLや予期せぬパラメータをバックアップへ持ち込まない。
       const safe = new URL(`${url.origin}${url.pathname}`);
       for (const key of ['format', 'name', 'tag']) {
@@ -38,16 +62,18 @@
       return safe.toString();
     } catch { return null; }
   }
-  function safeItem(v) {
-    if (!plain(v) || !/^\d{1,24}$/.test(String(v.postId || ''))) return null;
+  function safeItem(v, platform = 'x') {
+    if (!plain(v) || (platform === 'x'
+      ? !/^\d{1,24}$/.test(String(v.postId || ''))
+      : !/^[a-zA-Z0-9._~-]{1,80}$/.test(String(v.postId || '')))) return null;
     const mediaIndex = positiveInt(v.mediaIndex);
     if (mediaIndex < 1 || mediaIndex > 200) return null;
     const type = v.type === 'video' ? 'video' : v.type === 'image' ? 'image' : null;
     if (!type) return null;
     const obj = {
-      key: `${v.postId}_${mediaIndex}`, platform: 'x', postId: String(v.postId), mediaIndex, type,
-      url: safeMediaUrl(v.url) || '',
-      fallbackUrls: (Array.isArray(v.fallbackUrls) ? v.fallbackUrls : []).slice(0, 10).map(safeMediaUrl).filter(Boolean)
+      key: `${v.postId}_${mediaIndex}`, platform, postId: String(v.postId), mediaIndex, type,
+      url: safeMediaUrl(v.url, platform) || '',
+      fallbackUrls: (Array.isArray(v.fallbackUrls) ? v.fallbackUrls : []).slice(0, 10).map(url => safeMediaUrl(url, platform)).filter(Boolean)
     };
     for (const f of itemFields) { const s = str(v[f], 100); if (s !== null) obj[f] = s; }
     for (const f of ['width','height','bitrate']) { const n = num(v[f]); if (n !== null) obj[f] = n; }
@@ -73,25 +99,31 @@
     return out;
   }
   function safeCollection(v) {
-    if (!plain(v) || v.platform !== 'x') throw new Error('未対応のアカウント状態です');
-    const handle = str(v.handle, 50)?.replace(/^@/, '').toLowerCase();
-    if (!handle || !/^[a-z0-9_]{1,30}$/.test(handle)) throw new Error('アカウント名が不正です');
+    if (!plain(v) || !['x','bluesky'].includes(v.platform)) throw new Error('未対応のアカウント状態です');
+    const platform = v.platform;
+    const handle = str(v.handle, 253)?.replace(/^@/, '').toLowerCase();
+    if (!handle || (platform === 'x' ? !/^[a-z0-9_]{1,30}$/.test(handle) :
+      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$/.test(handle))) throw new Error('アカウント名が不正です');
+    if (platform === 'bluesky' && !/^did:(?:plc:[a-z2-7]{24}|web:[a-z0-9.:%_-]+)$/i.test(String(v.did || ''))) {
+      throw new Error('BlueskyのDIDが不正です');
+    }
     if (!Array.isArray(v.items) || v.items.length > MAX_ITEMS) throw new Error('収集件数が上限を超えています');
-    const items = v.items.map(safeItem);
+    const items = v.items.map(item => safeItem(item, platform));
     if (items.some((item) => !item)) throw new Error('メディア情報の形式が不正です');
     if (new Set(items.map((item) => item.key)).size !== items.length) throw new Error('同じメディアが状態ファイル内で重複しています');
-    const out = { platform: 'x', handle, items, counts: {
+    const out = { platform, handle, items, counts: {
       images: items.filter((x) => x.type === 'image').length,
       videos: items.filter((x) => x.type === 'video').length,
       total: items.length
     } };
+    if (platform === 'bluesky') { out.did = v.did; out.pds = safePdsOrigin(v.pds); }
     for (const f of stateStringFields) { const s = str(v[f], 300); if (s !== null) out[f] = s; }
     for (const f of stateNumFields) { const n = num(v[f]); if (n !== null) out[f] = n; }
     for (const f of ['deltaMode','deltaBoundaryReached','deltaVerified','lastNewCheckVerified']) {
       if (typeof v[f] === 'boolean') out[f] = v[f];
     }
     out.deltaOlderPostIds = (Array.isArray(v.deltaOlderPostIds) ? v.deltaOlderPostIds : [])
-      .filter((id) => /^\d{1,24}$/.test(String(id))).slice(0, 6).map(String);
+      .filter((id) => platform === 'x' ? /^\d{1,24}$/.test(String(id)) : /^[a-zA-Z0-9._~-]{1,80}$/.test(String(id))).slice(0, 6).map(String);
     for (const f of ['deltaSavedKinds','savedKinds']) {
       out[f] = { images: v[f]?.images === true, videos: v[f]?.videos === true };
     }
@@ -110,7 +142,7 @@
         if (sel.videos) out.savedKinds.videos = true;
       }
     }
-    out.collectionMode = out.collectionMode === 'manual' ? 'manual' : 'auto';
+    out.collectionMode = platform === 'bluesky' ? 'api' : out.collectionMode === 'manual' ? 'manual' : 'auto';
     out.status = out.status === 'complete' ? 'complete' : 'paused';
     out.pauseReason = out.status === 'paused' ? 'imported' : null;
     out.collectionPhase = null;
@@ -139,7 +171,9 @@
       downloadLimit: v?.downloadLimit === 'all' ? 'all' : '5',
       // 新規環境・モード未指定の古い設定は現在の初期値「手動」に揃える。
       // 明示的に「自動」を選んだユーザーの保存設定は変更しない。
-      collectionMode: v?.collectionMode === 'auto' ? 'auto' : 'manual'
+      collectionMode: v?.collectionMode === 'auto' ? 'auto' : 'manual',
+      xSplitMedia: v?.xSplitMedia !== false,
+      xRevertProfileTabs: v?.xRevertProfileTabs === true
     };
   }
   function accountEnvelope(current, previous = null, source = {}) {
@@ -153,14 +187,16 @@
     const keys = Object.keys(storage || {});
     const handles = new Set();
     for (const key of keys) {
-      const found = /^smz_(?:previous_)?collection_x_([a-z0-9_]{1,30})$/.exec(key);
-      if (found) handles.add(found[1]);
+      const found = /^smz_(?:previous_)?collection_(x|bluesky)_(.+)$/.exec(key);
+      if (found) handles.add(`${found[1]}_${found[2]}`);
     }
     if (handles.size > MAX_ACCOUNTS) throw new Error('アカウント数が上限を超えています');
     const accounts = [];
-    for (const handle of [...handles].sort()) {
-      const current = storage[`smz_collection_x_${handle}`] || null;
-      const previous = storage[`smz_previous_collection_x_${handle}`] || null;
+    for (const key of [...handles].sort()) {
+      const sep = key.indexOf('_');
+      const platform = key.slice(0,sep); const handle = key.slice(sep+1);
+      const current = storage[`smz_collection_${platform}_${handle}`] || null;
+      const previous = storage[`smz_previous_collection_${platform}_${handle}`] || null;
       if (!current) continue;
       accounts.push({ current: safeCollection(current), previous: previous ? safeCollection(previous) : null });
     }
@@ -176,7 +212,7 @@
       if (!item) throw new Error('アカウント別ZIPの形式が不正です');
       const current = safeCollection(item.current);
       const previous = item.previous ? safeCollection(item.previous) : null;
-      if (previous && previous.handle !== current.handle) throw new Error('前回データのアカウントが一致しません');
+      if (previous && (previous.handle !== current.handle || previous.platform !== current.platform)) throw new Error('前回データのアカウントが一致しません');
       return { format: ACCOUNT_FORMAT, version: VERSION,
         source: { zipNumber: positiveInt(input.source?.zipNumber),
           mediaKind: ['media','images','videos'].includes(input.source?.mediaKind) ? input.source.mediaKind : null },
@@ -188,10 +224,10 @@
     const accounts = input.accounts.map((entry) => {
       const current = safeCollection(entry.current);
       const previous = entry.previous ? safeCollection(entry.previous) : null;
-      if (previous && previous.handle !== current.handle) throw new Error('前回データのアカウントが一致しません');
+      if (previous && (previous.handle !== current.handle || previous.platform !== current.platform)) throw new Error('前回データのアカウントが一致しません');
       return { current, previous };
     });
-    if (new Set(accounts.map((v) => v.current.handle)).size !== accounts.length) throw new Error('同じアカウントが重複しています');
+    if (new Set(accounts.map((v) => `${v.current.platform}:${v.current.handle}`)).size !== accounts.length) throw new Error('同じアカウントが重複しています');
     return { format: FULL_FORMAT, version: VERSION, accounts,
       settings: safeSettings(input.settings), exportedAt: str(input.exportedAt, 50) };
   }

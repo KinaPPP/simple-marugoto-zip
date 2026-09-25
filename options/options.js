@@ -18,6 +18,30 @@
   let pendingOverwrite = null;
   let busy = false;
 
+  // 従来の全体JSONと同じ明示的な設定キーに保存する。認証情報は扱わない。
+  const X_SETTINGS_KEY = 'smz_user_settings_v1';
+  const xSplitCheckbox = $('xSplitMedia');
+  const xRevertCheckbox = $('xRevertProfileTabs');
+  const xFeedback = $('xOptionsFeedback');
+  async function loadXUiSettings() {
+    const storage = await chrome.storage.local.get(X_SETTINGS_KEY);
+    xSplitCheckbox.checked = storage[X_SETTINGS_KEY]?.xSplitMedia !== false;
+    xRevertCheckbox.checked = storage[X_SETTINGS_KEY]?.xRevertProfileTabs === true;
+  }
+  async function saveXUiSettings() {
+    const saved = await chrome.storage.local.get(X_SETTINGS_KEY);
+    await chrome.storage.local.set({ [X_SETTINGS_KEY]: {
+      ...(saved[X_SETTINGS_KEY] || {}),
+      xSplitMedia: xSplitCheckbox.checked,
+      xRevertProfileTabs: xRevertCheckbox.checked
+    } });
+    report(xFeedback, '保存しました。Xのタブを再読み込みすると反映されます。');
+  }
+  void loadXUiSettings().catch((error) => report(xFeedback, error.message, true));
+  xSplitCheckbox.addEventListener('change', () => void saveXUiSettings().catch((error) => report(xFeedback, error.message, true)));
+  xRevertCheckbox.addEventListener('change', () => void saveXUiSettings().catch((error) => report(xFeedback, error.message, true)));
+
+
   function report(element, text, error = false) {
     element.textContent = text || '';
     element.classList.toggle('error', error);
@@ -72,7 +96,7 @@
       const row = document.createElement('div');
       row.className = 'account-row';
       const name = document.createElement('strong');
-      name.textContent = `@${entry.current.handle}`;
+      name.textContent = `${entry.current.platform === 'bluesky' ? 'Bluesky' : 'X'} @${entry.current.handle}`;
       const detail = document.createElement('small');
       detail.textContent = `${Number(entry.current.counts.total || 0).toLocaleString('ja-JP')}件 / ${entry.current.archive?.status === 'archive_complete' ? 'ZIP保存完了' : '収集・ZIP状態あり'}`;
       row.append(name,detail);

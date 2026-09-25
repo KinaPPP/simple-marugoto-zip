@@ -1,8 +1,10 @@
 if (!globalThis.SMZBackup) importScripts('backup/schema.js');
+if (!globalThis.SMZBluesky && typeof importScripts === 'function') importScripts('providers/bluesky/api.js');
 const COLLECTION_PREFIX = 'smz_collection_';
 const PREVIOUS_COLLECTION_PREFIX = 'smz_previous_collection_';
 const RESUME_ALARM_PREFIX = 'smz_resume_';
 const collectionQueues = new Map();
+const blueskyJobs = new Map();
 let fullResetInProgress = false;
 
 // Blob URLの仮ファイル名(UUID)に負けないよう、拡張自身のZIPだけ
@@ -39,10 +41,13 @@ function toolbarSnapshot(state) {
   if (!state) return null;
   return {
     handle: state.handle || '',
+    platform: state.platform || 'x',
     status: state.status || null,
     collectionMode: state.collectionMode || 'auto',
     collectionPhase: state.collectionPhase || null,
     rateLimitSimulated: state.rateLimitSimulated === true,
+    pauseReason: state.pauseReason || null,
+    resumeAt: Number(state.resumeAt || 0),
     updatedAt: Number(state.updatedAt || 0),
     counts: { total: Number(state.counts?.total || 0) },
     archive: state.archive ? {
@@ -103,16 +108,16 @@ async function applyToolbarState(state) {
     badge = '確';
     badgeColor = TOOLBAR_COLORS.yellow;
     title = `シンプルまるごとZIP\n大量件数の確認待ち @${state.handle || ''}\nクリックして確認`;
-  } else if (state?.status === 'rate_limited') {
+  } else if (state?.status === 'rate_limited' || (state?.platform === 'bluesky' && state?.status === 'paused' && state?.pauseReason === 'rate_limit')) {
     badge = '待';
     badgeColor = TOOLBAR_COLORS.yellow;
     title = state.rateLimitSimulated
       ? `シンプルまるごとZIP\n疑似429テストで待機中（Xからの実際の429ではありません）\n@${state.handle || ''}`
-      : `シンプルまるごとZIP\nXのアクセス制限により待機中\n@${state.handle || ''}`;
+      : `シンプルまるごとZIP\n${state.platform === 'bluesky' ? 'Bluesky' : 'X'}のアクセス制限により停止中\n@${state.handle || ''}${state.platform === 'bluesky' ? '\n時間を置いて手動で再開' : ''}`;
   } else if (state?.status === 'collecting') {
     badge = '収';
     badgeColor = TOOLBAR_COLORS.blue;
-    title = state.collectionMode === 'manual'
+    title = state.platform === 'bluesky' ? `シンプルまるごとZIP\nBluesky API収集中 @${state.handle || ''}\n${formatToolbarCount(state.counts?.total)}件取得` : state.collectionMode === 'manual'
       ? `シンプルまるごとZIP\n手動スクロールで収集中 @${state.handle || ''}\nXの /media をスクロール。完了はポップアップで操作`
       : `シンプルまるごとZIP\n${state.collectionPhase === 'final_check' ? '収集の最終確認中' : 'メディア収集中'} @${state.handle || ''}\n詳細はクリックして確認`;
   } else if (archive?.status === 'archive_error') {
@@ -159,6 +164,21 @@ async function reconcileStaleArchiveStates() {
   for (const [key, value] of Object.entries(all)) {
     if (!key.startsWith(COLLECTION_PREFIX) || !value || typeof value !== 'object') continue;
 
+    // 旧β版で0件選択のまま保存を始めた場合の永続エラーを取り除く。
+    // 保存済みZIPのチェックポイントがあれば破棄せず、単に一時停止へ戻す。
+    if (value.archive?.status === 'archive_error' &&
+        value.archive?.lastError === '選択されたメディアがありません') {
+      if (Number(value.archive.savedZipCount || 0) > 0) {
+        value.archive = { ...value.archive, status: 'archive_paused', pauseReason: 'empty_selection',
+          lastError: null, currentFileCount: 0, updatedAt: Date.now() };
+      } else {
+        value.archive = null;
+      }
+      value.updatedAt = Date.now();
+      updates[key] = value;
+      continue;
+    }
+
     // v0.0.7以前に USER_CANCELED が archive_error として残ったデータを安全な一時停止へ移行する。
     if (value.archive?.status === 'archive_error' && /USER_CANCELED|USER_CANCELLED/i.test(String(value.archive?.lastError || ''))) {
       value.archive = {
@@ -173,8 +193,13 @@ async function reconcileStaleArchiveStates() {
       continue;
     }
 
+    // ChromeがService Workerを破棄した場合、API収集を永久に「収集中」にしない。
+    if (value.platform === 'bluesky' && value.status === 'collecting' && !blueskyJobs.has(key)) {
+      value.status = 'paused'; value.pauseReason = 'runtime_interrupted'; value.updatedAt = Date.now();
+      updates[key] = value;
+    }
     if (value.archive?.status !== 'archiving') continue;
-    const sameActiveJob = runtime.active && normalizeHandle(runtime.handle) === normalizeHandle(value.handle);
+    const sameActiveJob = runtime.active && (runtime.platform || 'x') === (value.platform || 'x') && normalizeHandle(runtime.handle) === normalizeHandle(value.handle);
     if (sameActiveJob) continue;
     value.archive = {
       ...value.archive,
@@ -200,7 +225,7 @@ async function restoreToolbarState() {
   try {
     [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   } catch {}
-  const activeHandle = xHandleFromUrl(activeTab?.url || '');
+  const activeHandle = xHandleFromUrl(activeTab?.url || '') || blueskyHandleFromUrl(activeTab?.url || '');
   const confirmationMatchesActivePage = (state) => {
     if (state?.status !== 'awaiting_confirmation') return false;
     // 黄色い「確」は、現在表示しているXアカウントが確認対象と一致する時だけ表示する。
@@ -210,7 +235,7 @@ async function restoreToolbarState() {
 
   const priority = (state) => {
     if (state?.archive?.status === 'archiving') return 110;
-    if (state?.status === 'rate_limited') return 105;
+    if (state?.status === 'rate_limited' || (state?.platform === 'bluesky' && state?.status === 'paused' && state?.pauseReason === 'rate_limit')) return 105;
     if (state?.status === 'collecting') return 100;
     if (state?.archive?.status === 'archive_complete' && state.archive.completionAcknowledged === false) return 95;
     if (state?.status === 'awaiting_confirmation') return confirmationMatchesActivePage(state) ? 85 : 0;
@@ -258,6 +283,16 @@ function xHandleFromUrl(urlString) {
   }
 }
 
+function blueskyHandleFromUrl(urlString) {
+  try {
+    const u = new URL(urlString || '');
+    if (!['bsky.app', 'www.bsky.app'].includes(u.hostname.toLowerCase())) return null;
+    const match = /^\/profile\/([^/?#]+)/.exec(u.pathname);
+    const actor = match ? decodeURIComponent(match[1]).replace(/^@/, '').toLowerCase() : null;
+    return SMZBluesky.validActor(actor) ? actor : null;
+  } catch { return null; }
+}
+
 function archiveMediaKind(selection) {
   const images = selection?.images !== false;
   const videos = selection?.videos !== false;
@@ -275,8 +310,8 @@ function previousCollectionKey(platform, handle) {
   return `${PREVIOUS_COLLECTION_PREFIX}${platform}_${normalizeHandle(handle)}`;
 }
 
-function validPostId(value) {
-  return /^\d+$/.test(String(value || ''));
+function validPostId(value, platform = 'x') {
+  return platform === 'bluesky' ? /^[a-zA-Z0-9._~-]{1,80}$/.test(String(value || '')) : /^\d+$/.test(String(value || ''));
 }
 
 // XのSnowflake IDはNumberで正確に扱えないため、整数文字列として比較する。
@@ -294,7 +329,7 @@ function deltaKindsSaved(state) {
 }
 
 function canStartNewOnlyCheck(state) {
-  if (!state || state.status !== 'complete' || !validPostId(state.newestPostId)) return false;
+  if (!state || state.status !== 'complete' || !validPostId(state.newestPostId, state.platform)) return false;
   // 未保存の全件収集を差分で上書きしない。旧版の完成済みZIPは選択種別の履歴が
   // 残っていないことがあるため、archive_completeのみを必須とする。
   if (state.archive?.status !== 'archive_complete') return false;
@@ -435,7 +470,7 @@ async function finishCollectionState(current, { endOfFeed = false, manual = fals
   current.resumeAt = null;
   current.completedAt = Date.now();
   current.updatedAt = Date.now();
-  current.items.sort(comparePostIdsDesc);
+  current.items.sort(current.platform === 'bluesky' ? (a,b) => a.postId === b.postId ? a.mediaIndex-b.mediaIndex : a.postId>b.postId ? -1 : 1 : comparePostIdsDesc);
   current.newestPostId = current.items[0]?.postId || null;
   current.oldestPostId = current.items.at(-1)?.postId || null;
   if (current.deltaMode) {
@@ -596,6 +631,93 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+
+// Blueskyはスクロールを使わず、公開APIのcursorでページングする。
+// ページごとに永続化し、手動停止やService Workerの中断後も同じcursorから再開可能。
+function bskyNewCollection(profile, pds) {
+  const state = makeNewCollection(profile.handle);
+  state.platform = 'bluesky';
+  state.did = profile.did;
+  state.pds = pds;
+  state.collectionMode = 'api';
+  state.resumeCursor = null;
+  state.pagesFetched = 0;
+  state.scannedPosts = 0;
+  state.largeWarningConfirmed = true;
+  return state;
+}
+
+async function runBlueskyCollection(handle, job) {
+  const key = collectionKey('bluesky', handle);
+  let cursor = job.cursor || null;
+  const fetcher = (url, options) => fetch(url, { ...options, signal: job.abort.signal });
+  try {
+    for (let n = 0; n < 10000; n++) {
+      if (job.stopped) return;
+      const page = await SMZBluesky.page(job.did, cursor, fetcher);
+      if (job.stopped) return;
+      let boundaryReached = false;
+      const collected = [];
+      let scanned = 0;
+      for (const entry of page.feed) {
+        const post = SMZBluesky.extract(entry, job.did, job.pds);
+        if (!post) continue;
+        scanned++;
+        if (job.baseline && post.postId <= job.baseline) {
+          boundaryReached = true;
+          break;
+        }
+        collected.push(...post.items);
+      }
+      const nextCursor = page.cursor && page.cursor !== cursor ? page.cursor : null;
+      const endOfFeed = !nextCursor || page.feed.length === 0;
+      const state = await withCollectionLock('bluesky', handle, async (current) => {
+        if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting' || job.stopped) return null;
+        const existing = new Set(current.items.map(v => v.key));
+        for (const item of collected) {
+          if (existing.has(item.key)) continue;
+          existing.add(item.key);
+          current.items.push(item);
+          if (item.type === 'image') current.counts.images++;
+          else current.counts.videos++;
+        }
+        current.counts.total = current.counts.images + current.counts.videos;
+        current.items.sort((a,b) => a.postId === b.postId ? a.mediaIndex-b.mediaIndex : a.postId>b.postId ? -1 : 1);
+        current.newestPostId = current.items[0]?.postId || null;
+        current.oldestPostId = current.items.at(-1)?.postId || null;
+        current.pagesFetched = Number(current.pagesFetched || 0) + 1;
+        current.scannedPosts = Number(current.scannedPosts || 0) + scanned;
+        current.resumeCursor = nextCursor;
+        if (current.deltaMode) current.deltaBoundaryReached = boundaryReached;
+        current.updatedAt = Date.now();
+        if (boundaryReached || endOfFeed) {
+          return finishCollectionState(current, { endOfFeed, manual: false });
+        }
+        await setCollection(current);
+        return current;
+      });
+      if (!state || state.status !== 'collecting' || boundaryReached || endOfFeed) return;
+      cursor = nextCursor;
+      // APIレート制限を迂回しない。通常収集でもページ間に一定の休止を置く。
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    throw new Error('ページ数の安全上限に達しました。ここまでの収集は保持しています');
+  } catch (error) {
+    if (job.stopped || error?.name === 'AbortError') return;
+    await withCollectionLock('bluesky', handle, async current => {
+      if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting') return;
+      current.status = 'paused';
+      current.pauseReason = error?.status === 429 ? 'rate_limit' : 'error';
+      current.lastError = error?.status === 429 ? 'Bluesky APIから429を受けました。時間を置いて手動で再開してください' : String(error.message || error);
+      current.resumeAt = error?.status === 429 ? Date.now() + Math.max(15*60*1000, (error.retryAfter || 0)*1000) : null;
+      current.updatedAt = Date.now();
+      await setCollection(current);
+    });
+  } finally {
+    if (blueskyJobs.get(key) === job) blueskyJobs.delete(key);
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target === 'offscreen') return false;
 
@@ -663,6 +785,100 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         if (!result?.ok) throw new Error(result?.error || '対象タブは現在収集中ではありません');
         sendResponse({ ok: true, state: await getCollection('x', handle) });
+        break;
+      }
+
+      case 'SMZ_BSKY_GET_PROFILE': {
+        const profile = await SMZBluesky.profile(normalizeHandle(message.actor));
+        const pds = await SMZBluesky.resolvePds(profile.did);
+        sendResponse({ ok: true, profile, pds });
+        break;
+      }
+
+      case 'SMZ_BSKY_START_COLLECTION': {
+        const actor = normalizeHandle(message.handle);
+        const profile = await SMZBluesky.profile(actor);
+        const pds = await SMZBluesky.resolvePds(profile.did);
+        const key = collectionKey('bluesky', profile.handle);
+        if (blueskyJobs.has(key)) throw new Error('Blueskyの収集がまだ進行中です');
+        if (!await chrome.permissions.contains({ origins: [`${pds}/*`] })) {
+          throw new Error('元データを取得するPDSへのアクセスが許可されていません。もう一度ポップアップを開いてください');
+        }
+        await acknowledgeArchiveCompletions();
+        let state = await getCollection('bluesky', profile.handle);
+        if (state?.status === 'collecting' || state?.archive?.status === 'archiving') {
+          throw new Error('処理中のため開始できません');
+        }
+        if (state?.resumeAt && state.pauseReason === 'rate_limit' && state.resumeAt > Date.now()) {
+          throw new Error('APIのアクセス制限が終了するまで待ってください');
+        }
+        if (message.newOnly) {
+          if (!canStartNewOnlyCheck(state)) throw new Error('差分チェック前に前回のZIP保存を完了してください');
+          const previous = state;
+          state = bskyNewCollection(profile, pds);
+          state.deltaMode = true;
+          state.deltaBaselinePostId = previous.newestPostId;
+          state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
+          state.deltaBoundaryReached = false;
+          state.deltaVerified = false;
+          state.deltaSavedKinds = { images: false, videos: false };
+          state.preferredSaveDirectoryKey = previous.archive?.saveDirectoryKey || previous.preferredSaveDirectoryKey || null;
+          state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
+          await chrome.storage.local.set({ [previousCollectionKey('bluesky', profile.handle)]: previous });
+        } else if (message.restart || !state) {
+          state = bskyNewCollection(profile, pds);
+        } else if (state.status === 'complete') {
+          throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
+        } else {
+          state.status = 'collecting';
+          state.pauseReason = null;
+          state.resumeAt = null;
+          state.lastError = null;
+          state.did = profile.did;
+          state.pds = pds;
+          state.updatedAt = Date.now();
+        }
+        state.collectionMode = 'api';
+        const job = { did: profile.did, pds, collectionId: state.collectionId,
+          baseline: state.deltaMode ? state.deltaBaselinePostId : null,
+          cursor: state.resumeCursor || null, stopped: false, abort: new AbortController() };
+        blueskyJobs.set(key, job);
+        await setCollection(state);
+        // 収集はポップアップを閉じてもService Worker上で続く。1ページごとに進捗保存。
+        void runBlueskyCollection(profile.handle, job);
+        sendResponse({ ok: true, state });
+        break;
+      }
+
+      case 'SMZ_BSKY_STOP_COLLECTION': {
+        const handle = normalizeHandle(message.handle);
+        const key = collectionKey('bluesky', handle);
+        const job = blueskyJobs.get(key);
+        if (job) { job.stopped = true; job.abort.abort(); }
+        const state = await withCollectionLock('bluesky', handle, async current => {
+          if (!current || current.status !== 'collecting') return current;
+          current.status = 'paused'; current.pauseReason = 'manual'; current.updatedAt = Date.now();
+          await setCollection(current);
+          return current;
+        });
+        sendResponse({ ok: true, state });
+        break;
+      }
+
+      case 'SMZ_BSKY_CANCEL_DELTA': {
+        const handle = normalizeHandle(message.handle);
+        const key = previousCollectionKey('bluesky', handle);
+        const saved = await chrome.storage.local.get(key);
+        const previous = saved[key];
+        const state = await getCollection('bluesky', handle);
+        if (!state?.deltaMode || !['paused','complete'].includes(state.status) ||
+            state.archive?.status === 'archiving' || Number(state.archive?.savedZipCount || 0) > 0 || !previous) {
+          throw new Error('前回の状態へ戻せません');
+        }
+        await chrome.storage.local.set({ [collectionKey('bluesky', handle)]: previous });
+        await chrome.storage.local.remove(key);
+        await restoreToolbarState();
+        sendResponse({ ok: true, state: previous });
         break;
       }
 
@@ -1049,25 +1265,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'SMZ_START_ARCHIVE': {
         const handle = normalizeHandle(message.handle);
-        // 次のZIP処理を開始したら、以前の完了通知は自動的に解除する。
-        await acknowledgeArchiveCompletions();
-        const state = await getCollection('x', handle);
+        const platform = message.platform === 'bluesky' ? 'bluesky' : 'x';
+        const state = await getCollection(platform, handle);
         const collectionCanArchive = state && ['paused', 'complete'].includes(state.status);
         if (!state || !collectionCanArchive) {
           throw new Error('メディアを収集中はZIP保存できません。収集を停止するか完了まで待ってください');
         }
         if (!(state.counts?.total > 0)) throw new Error('保存できるメディアがまだありません');
-        if (!state.collectionId) {
-          state.collectionId = makeCollectionId();
-          state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 2);
-        }
-        await ensureOffscreenDocument();
-
         const selection = {
           images: message.selection?.images !== false,
           videos: message.selection?.videos !== false
         };
         if (!selection.images && !selection.videos) throw new Error('画像または動画を選択してください');
+        // 保存対象0件はジョブ作成・進捗更新・PDS権限要求前に拒否する。
+        if (!(Array.isArray(state.items)
+          ? state.items.some(item => (item.type === 'image' && selection.images) || (item.type === 'video' && selection.videos))
+          : ((selection.images ? Number(state.counts?.images || 0) : 0) +
+             (selection.videos ? Number(state.counts?.videos || 0) : 0)) > 0)) {
+          throw new Error('選択されたメディアがありません。画像・動画のチェックを変更してください');
+        }
+        // 次のZIP処理を開始したら、以前の完了通知は自動的に解除する。
+        await acknowledgeArchiveCompletions();
+        if (!state.collectionId) {
+          state.collectionId = makeCollectionId();
+          state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 2);
+        }
+        await ensureOffscreenDocument();
         let splitMode = ['auto', '500mb', '1gb', '500files'].includes(message.splitMode) ? message.splitMode : 'auto';
         const runLimit = Number(message.runLimit) === 5 ? 5 : null;
         const mediaKind = archiveMediaKind(selection);
@@ -1143,7 +1366,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.runtime.sendMessage({
           target: 'offscreen',
           type: 'SMZ_OFFSCREEN_START_ARCHIVE',
-          platform: 'x',
+          platform,
           handle,
           selection,
           splitMode,
@@ -1217,7 +1440,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const all = await chrome.storage.local.get(null);
         sendResponse({ ok: true, accounts: Object.entries(all)
           .filter(([key, value]) => key.startsWith(COLLECTION_PREFIX) && value?.handle)
-          .map(([, value]) => ({ handle: value.handle, updatedAt: value.updatedAt || 0,
+          .map(([, value]) => ({ handle: value.handle, platform: value.platform || 'x', updatedAt: value.updatedAt || 0,
             count: Number(value.counts?.total || 0), status: value.status })) });
         break;
       }
@@ -1245,8 +1468,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         for (const item of backup.accounts) {
           const handle = item.current.handle;
-          const key = collectionKey('x', handle);
-          const prev = previousCollectionKey('x', handle);
+          const platform = item.current.platform || 'x';
+          const key = collectionKey(platform, handle);
+          const prev = previousCollectionKey(platform, handle);
           if (all[key] && mode === 'merge') { skipped++; continue; }
           // 復元後は古いタブID・保存先ハンドルを引き継がず、明示操作で再開。
           patch[key] = item.current;

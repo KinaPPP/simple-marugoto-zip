@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "シンプルまるごとZIP",
   "short_name": "まるごとZIP",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "SNSのユーザー投稿メディアをまとめて収集し、画像・動画を整理したZIPで保存します。自動/手動収集、差分収集、状態バックアップ・復元に対応します。",
   "permissions": [
     "storage",
@@ -17,7 +17,13 @@
     "https://x.com/*",
     "https://twitter.com/*",
     "https://pbs.twimg.com/*",
-    "https://video.twimg.com/*"
+    "https://video.twimg.com/*",
+    "https://bsky.app/*",
+    "https://public.api.bsky.app/*",
+    "https://plc.directory/*",
+    "https://bsky.social/*",
+    "https://*.bsky.network/*",
+    "https://cdn.bsky.app/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -61,5 +67,9 @@
       ],
       "run_at": "document_start"
     }
+  ],
+  "version_name": "1.1.1 X-UI test",
+  "optional_host_permissions": [
+    "https://*/*"
   ]
 }

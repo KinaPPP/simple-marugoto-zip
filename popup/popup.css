@@ -84,6 +84,13 @@ input[type="checkbox"], input[type="radio"] { accent-color:var(--blue); vertical
 .debug-panel { border-style:dashed; }
 .debug-radios { gap:24px; }
 .debug-badge { display:inline-block; margin-left:2px; padding:1px 4px; border-radius:9px; background:#fff3cd; color:#7c4a00; font-size:8px; font-weight:800; vertical-align:1px; }
-.notice { position:fixed; left:10px; right:10px; bottom:64px; z-index:100; max-height:48px; overflow:auto; border-radius:var(--r); border:1px solid #f0c36d; background:#fff9e8; color:#7c4a00; font-size:9px; line-height:1.35; padding:6px 8px; box-shadow:0 3px 12px rgba(0,0,0,.18); }
+.notice { position:absolute; left:6px; right:6px; top:22px; z-index:2; max-height:78px; overflow:auto; border-radius:var(--r); border:1px solid #f0c36d; background:#fff9e8; color:#7c4a00; font-size:9px; line-height:1.35; padding:6px 8px; box-shadow:0 3px 12px rgba(0,0,0,.18); }
 .notice.error { border-color:#fca5a5; background:#fff5f5; color:#991b1b; }
 .hidden { display:none !important; }
+
+/* 通知はステータス枠内だけで表示し、保存ボタンや操作欄に重ねない。 */
+.status-panel.has-notice .status-detail, .status-panel.has-notice .progress-track,
+.status-panel.has-notice .resume-row { visibility:hidden; }
+#mediaHint.empty-selection { color:#a33b24; font-weight:700; }
+
+.status-panel.archive-error .status-detail { color:#991b1b; font-weight:650; }

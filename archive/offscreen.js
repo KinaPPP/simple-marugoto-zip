@@ -41,8 +41,10 @@ function mediaKindFromSelection(selection) {
   return 'media';
 }
 
-function archiveFilename(handle, startedAt, mediaKind, zipNumber) {
-  return `${safeName(handle)}_${archiveTimestamp(startedAt)}_${mediaKind || 'media'}_${String(zipNumber).padStart(3, '0')}.zip`;
+function archiveRoot(job) { return safeName(job.platform === 'bluesky' ? `bsky_${job.handle}` : job.handle); }
+
+function archiveFilename(handle, startedAt, mediaKind, zipNumber, platform = 'x') {
+  return `${safeName(platform === 'bluesky' ? `bsky_${handle}` : handle)}_${archiveTimestamp(startedAt)}_${mediaKind || 'media'}_${String(zipNumber).padStart(3, '0')}.zip`;
 }
 
 function mimeExtension(contentType, fallback) {
@@ -67,6 +69,12 @@ async function fetchMedia(item) {
     try {
       const response = await fetch(url, { cache: 'no-store', credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // 一部PDSは、取得失敗時に200でHTML/JSONのエラー本文を返す可能性がある。
+      // 画像・動画のファイル名でエラーページを保存しないよう、BlueskyのBlobのみ検査する。
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (item.platform === 'bluesky' && /^(?:text\/html|application\/(?:json|problem\+json))\b/.test(contentType)) {
+        throw new Error(`メディアではない応答 (${contentType})`);
+      }
       const buffer = await response.arrayBuffer();
       return {
         data: new Uint8Array(buffer),
@@ -350,7 +358,7 @@ async function checkpointFile(state, previous, archive, job, endIndex, zipNumber
       if (zipped.length < raw.length) { compressed = zipped; method = 8; }
     } catch { /* 古いChromeでは無圧縮で格納 */ }
   }
-  return { name: `${safeName(job.handle)}/backup-state.json`, data: compressed,
+  return { name: `${archiveRoot(job)}/backup-state.json`, data: compressed,
     uncompressedSize: raw.length, checksum: crc32(raw), method, postedAt: Date.now() };
 }
 
@@ -371,7 +379,7 @@ async function runArchiveDirectory(job, state, previous, archive, items, limits,
     let chunkBytes = 0;
     let consumedIndex = index;
     let writer = null;
-    const filename = archiveFilename(job.handle, archive.startedAt || state.archive?.startedAt || Date.now(), job.mediaKind || archive.mediaKind || mediaKindFromSelection(job.selection), zipNumber);
+    const filename = archiveFilename(job.handle, archive.startedAt || state.archive?.startedAt || Date.now(), job.mediaKind || archive.mediaKind || mediaKindFromSelection(job.selection), zipNumber, job.platform);
 
     try {
       while (index < items.length && runDownloaded < runLimit) {
@@ -418,7 +426,7 @@ async function runArchiveDirectory(job, state, previous, archive, items, limits,
         const folder = item.type === 'video' ? 'videos' : 'images';
         const ext = fetched.extension || item.extension || (item.type === 'video' ? 'mp4' : 'jpg');
         await writer.add({
-          name: `${safeName(job.handle)}/${folder}/${item.postId}_${item.mediaIndex}.${ext}`,
+          name: `${archiveRoot(job)}/${folder}/${item.postId}_${item.mediaIndex}.${ext}`,
           data: fetched.data,
           postedAt: item.postedAt
         });
@@ -548,7 +556,7 @@ function selectedItems(state, selection) {
 async function patchArchive(handle, patch) {
   const result = await runtimeMessage({
     type: 'SMZ_ARCHIVE_PATCH',
-    platform: 'x',
+    platform: activeJob?.platform || 'x',
     handle,
     patch
   });
@@ -558,7 +566,7 @@ async function patchArchive(handle, patch) {
 
 async function saveChunk(handle, startedAt, mediaKind, zipNumber, files, job) {
   const blob = buildZipBlob(files);
-  const filename = archiveFilename(handle, startedAt, mediaKind, zipNumber);
+  const filename = archiveFilename(handle, startedAt, mediaKind, zipNumber, job.platform);
 
   if (job.saveMode === 'directory' && job.saveDirectoryKey && globalThis.SMZFileSystem) {
     try {
@@ -589,7 +597,7 @@ async function runArchive(job) {
   cancelRequested = false;
   activeJob = job;
 
-  const stateResult = await runtimeMessage({ type: 'SMZ_ARCHIVE_GET_STATE', platform: 'x', handle: job.handle });
+  const stateResult = await runtimeMessage({ type: 'SMZ_ARCHIVE_GET_STATE', platform: job.platform || 'x', handle: job.handle });
   if (!stateResult?.ok || !stateResult.state) throw new Error(stateResult?.error || '収集データを読み込めません');
   let state = stateResult.state;
   const previous = stateResult.previous || null;
@@ -603,19 +611,19 @@ async function runArchive(job) {
   const runLimit = Number(job.runLimit) === 5 ? 5 : Infinity;
   let runDownloaded = 0;
 
+  if (!items.length) throw new Error('選択されたメディアがありません');
+
   await patchArchive(job.handle, {
     status: 'archiving',
     totalSelected: items.length,
     currentZipNumber: zipNumber,
     processedItems: index,
-    progress: items.length ? index / items.length : 1,
+    progress: items.length ? index / items.length : 0,
     runLimit: Number.isFinite(runLimit) ? runLimit : null,
     pauseReason: null,
     batchSaved: 0,
     lastError: null
   });
-
-  if (!items.length) throw new Error('選択されたメディアがありません');
 
   // File System Access APIで保存先フォルダを選んだ場合は、ZIPをディスクへ直接
   // ストリーミング書き込みする。500件級でも全ファイルをメモリへ抱え込まない。
@@ -666,7 +674,7 @@ async function runArchive(job) {
       const folder = item.type === 'video' ? 'videos' : 'images';
       const ext = fetched.extension || item.extension || (item.type === 'video' ? 'mp4' : 'jpg');
       chunk.push({
-        name: `${safeName(job.handle)}/${folder}/${item.postId}_${item.mediaIndex}.${ext}`,
+        name: `${archiveRoot(job)}/${folder}/${item.postId}_${item.mediaIndex}.${ext}`,
         data: fetched.data,
         postedAt: item.postedAt
       });
@@ -774,7 +782,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== 'offscreen') return;
 
   if (message.type === 'SMZ_OFFSCREEN_GET_STATUS') {
-    sendResponse({ active: !!activeJob, handle: activeJob?.handle || null });
+    sendResponse({ active: !!activeJob, handle: activeJob?.handle || null, platform: activeJob?.platform || null });
     return true;
   }
 
