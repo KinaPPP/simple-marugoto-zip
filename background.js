@@ -613,11 +613,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     state.updatedAt = Date.now();
     await setCollection(state);
     try {
-      await sendToTab(target.id, { type: 'SMZ_RESUME_COLLECTION', handle, collectionId: state.collectionId,
+      const result = await sendToTab(target.id, { type: 'SMZ_RESUME_COLLECTION', handle, collectionId: state.collectionId,
         collectionMode: state.collectionMode || 'auto', deltaBaselinePostId: state.deltaBaselinePostId || null, automatic: true });
+      // Xのエラー画面などでcontent側が再開を受け付けなかった場合は、収集中と誤表示しない。
+      if (!result?.ok) throw new Error(result?.error || 'Xの画面から自動再開できませんでした');
     } catch (error) {
       state.status = 'paused';
       state.pauseReason = 'resume_ready';
+      state.resumeAt = null;
       state.lastError = error.message;
       state.updatedAt = Date.now();
       await setCollection(state);

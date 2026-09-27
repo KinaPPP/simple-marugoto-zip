@@ -1,7 +1,7 @@
 # シンプルまるごとZIP / simple-marugoto-zip 仕様書
 
 作成日: 2026-09-19  
-ステータス: v1.0.0 X向け初回正式版（v0.0.24実機確認済み）
+ステータス: 初版仕様の履歴資料。v1.2.0の現行機能はREADME.md、docs/RELEASE_NOTES_v1.2.0.md、docs/X_NEW_UI_TEST.mdを参照。
 
 ## 1. 目的
 

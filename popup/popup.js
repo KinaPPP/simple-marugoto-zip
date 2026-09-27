@@ -368,7 +368,11 @@ function render() {
       }
     } else if (state.status === 'rate_limited') {
       els.statusTitle.textContent = state.rateLimitSimulated ? '疑似429テスト：一時停止中' : 'Xのアクセス制限により一時停止中';
-      els.statusDetail.textContent = `${detailBase} / ${state.resumeAt ? `${fmtTime(state.resumeAt)}ごろ自動再開予定` : '再開待機中'}。${state.rateLimitSimulated ? '開発用テスト信号（実際の429ではありません）。' : '強引な再試行はしません。'}`;
+      const waitLabel = state.resumeAt ? `${fmtTime(state.resumeAt)}ごろ待機解除予定` : '再開待機中';
+      // ステータス欄は2行固定。青ボタンが必要になる条件を省略しない。
+      els.statusDetail.textContent = state.rateLimitSimulated
+        ? `${waitLabel}。疑似429（実際の429ではありません）。`
+        : `${waitLabel}。Xタブで再開を試み、動かなければ青ボタンから操作。`;
       setProgress('none');
       els.collectBtn.textContent = '待機中';
     } else if (state.status === 'paused') {

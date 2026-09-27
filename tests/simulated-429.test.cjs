@@ -11,7 +11,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function createBackgroundHarness() {
+function createBackgroundHarness({ resumeAck = true } = {}) {
   const collections = {
     smz_collection_x_demo: {
       schemaVersion: 2,
@@ -65,6 +65,9 @@ function createBackgroundHarness() {
             collectionId: msg.collectionId, resumeAt: msg.resumeAt, simulated: true
           }, tabSender());
           return { ok: result.ok && result.state?.status === 'rate_limited', error: result.error };
+        }
+        if (msg.type === 'SMZ_RESUME_COLLECTION' && !resumeAck) {
+          return { ok: false, error: 'X側のエラー画面から再開できません' };
         }
         return { ok: true };
       },
@@ -432,7 +435,24 @@ async function testMainHookEarlyBatch() {
   console.log('PASS X hook: early /media responses survive content bootstrap and are replayed exactly once');
 }
 
+async function testFailedAutomaticResumeAcknowledgement() {
+  const env = createBackgroundHarness({ resumeAck: false });
+  await tick();
+  const result = await env.dispatch({type:'SMZ_COLLECTION_RATE_LIMIT',handle:'demo',collectionId:'demo-job-1',
+    resumeAt:Date.now()+60_000}, {tab:{id:11,url:'https://x.com/demo/media'}});
+  assert.equal(result.ok,true);
+  await env.alarm('smz_resume_x_demo');
+  const state = env.collections.smz_collection_x_demo;
+  assert.equal(state.status,'paused','a rejected resume must not masquerade as active collection');
+  assert.equal(state.pauseReason,'resume_ready');
+  assert.equal(state.resumeAt,null,'expired wait should be cleared when user action is required');
+  assert.match(state.lastError,/X側のエラー画面/);
+  assert.equal(state.counts.total,2,'existing media must survive failed auto resume');
+  console.log('PASS X 429: failed automatic resume acknowledgement leaves a safe manual-resume state');
+}
+
 (async () => {
+  await testFailedAutomaticResumeAcknowledgement();
   await testBackground();
   await testContent();
   await testManualBackground();

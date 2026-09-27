@@ -11,7 +11,7 @@ const manifest = JSON.parse(read('manifest.json'));
 const popup = read('popup/popup.html');
 const options = read('options/options.html');
 const popupCode = read('popup/popup.js');
-assert.equal(manifest.version, '1.1.1');
+assert.equal(manifest.version, '1.2.0');
 assert.match(popup, /name="collectionMode"[^>]*value="manual" checked/);
 assert.doesNotMatch(popup, /name="collectionMode"[^>]*value="auto" checked/);
 assert.doesNotMatch(popup, /name="split"[^>]*value="10files"/);
@@ -19,12 +19,14 @@ assert.match(popup, /300 MBまたは300ファイル/);
 assert.doesNotMatch(options, /id="diagnosticDetails"|id="refreshSessionsBtn"|疑似429テスト/);
 assert.match(popupCode, /collectionMode:\s*'manual'/);
 assert.doesNotMatch(popupCode, /\['auto','500mb','1gb','10files','500files'\]/);
+assert.match(popupCode, /ごろ待機解除予定/);
+assert.doesNotMatch(popupCode, /ごろ自動再開予定/);
 const backupVm = vm.createContext({URL, console});
 vm.runInContext(read('backup/schema.js'), backupVm);
 assert.equal(backupVm.SMZBackup.safeSettings(null).collectionMode, 'manual');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'auto'}).collectionMode,'auto');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'manual'}).collectionMode,'manual');
-console.log('PASS release UI: v1.1.1, new user manual, existing auto retained, no debug/10-file choices');
+console.log('PASS release UI: v1.2.0, new user manual, existing auto retained, no debug/10-file choices');
 
 async function splitTest(total, fileBytes, scaledMB, expectedIndexes) {
   const items = Array.from({length:total},(_,i)=>({
@@ -139,5 +141,5 @@ async function legacyTest() {
   console.log('PASS auto 300-MB boundary (scaled bytes): second file split, per-ZIP checkpoints');
   await legacyTest();
   console.log('PASS migration: paused v0.0.23 10-file job resumes, completed job uses new auto');
-  console.log('PASS v1.1.1 offline release suite');
+  console.log('PASS v1.2.0 offline release suite');
 })().catch(e=>{console.error(e);process.exitCode=1});
