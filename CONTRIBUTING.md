@@ -8,7 +8,7 @@ Issue / Pull Requestを歓迎します。
 
 - Chromeのバージョン
 - 拡張機能のバージョン
-- 対象SNS（現在はX）
+- 対象SNS（X / Bluesky / Threads）
 - 再現手順
 - 期待した動作
 - 実際の動作

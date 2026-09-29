@@ -1,5 +1,19 @@
 # GitHub公開チェックリスト
 
+## v1.3.0 公開ゲート（2026-09-29）
+
+- [x] manifest／ポップアップ／設定画面をv1.3.0へ統一。
+- [x] Threads本人アカウントの全件収集、停止・再開、10分割ZIP、途中ZIP復元、最終ZIP完了復元を実機確認。
+- [x] Threads長期トークン更新、設定画面3タブ、差分3件→001.zip、差分ZIP単独から累計2,828件復元を実機確認。
+- [x] Service Worker復旧、復元ロックのアカウント単位化、取得失敗後の差分、安全な累計スナップショットを回帰テスト。
+- [x] README／CHANGELOG／PRIVACY／TESTING／v1.3.0リリースノートを正式版向けに更新。
+- [x] `node tests/*.cjs` と全JavaScriptの構文検査を実行。
+- [x] 配布ZIP内部の最上位フォルダを `simple-marugoto-zip/` に固定し、認証情報・実データを同梱しない。
+- [ ] GitHub mainへv1.3.0ソースを反映。
+- [ ] `v1.3.0` Releaseを作成し、`simple-marugoto-zip-v1.3.0.zip` を添付。
+
+---
+
 ## v1.2.0 公開ゲート（2026-09-27）
 
 - [x] v1.1.1 X新UIテスト版のコードと既存機能を保持したまま、manifest・画面・README・変更履歴・リリースノートをv1.2.0に更新。

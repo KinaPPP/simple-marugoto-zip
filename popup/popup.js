@@ -53,6 +53,7 @@ let preferredCollectionMode = 'manual';
 let manualFinishBusy = false;
 let manualFinishFeedback = '';
 let noticeUntil = 0;
+let archiveStopPending = false;
 
 function getCurrentSettings() {
   return {
@@ -104,6 +105,11 @@ function parseTarget(urlString) {
           !/^did:(?:plc:[a-z2-7]{24}|web:[a-z0-9.:%_-]+)$/i.test(actor)) return null;
       return { platform:'bluesky', handle:actor, apiReady:false, pds:null };
     }
+    if (['threads.com','www.threads.com','threads.net','www.threads.net'].includes(host)) {
+      const handle = decodeURIComponent(parts[0] || '').replace(/^@/, '').toLowerCase();
+      if (!/^[a-z0-9_](?:[a-z0-9._]{0,28}[a-z0-9_])?$/.test(handle) || handle.includes('..')) return null;
+      return { platform:'threads', handle, apiReady:false };
+    }
     if (!['x.com','www.x.com','twitter.com','www.twitter.com'].includes(host)) return null;
     const handle = parts[0]?.replace(/^@/, '');
     if (!handle || RESERVED.has(handle.toLowerCase())) return null;
@@ -112,6 +118,22 @@ function parseTarget(urlString) {
 }
 
 function fmtCount(value) { return Number(value || 0).toLocaleString('ja-JP'); }
+function cumulativeCountsForState(value) {
+  if (!value?.counts) return null;
+  const current = {
+    images: Number(value.counts.images || 0),
+    videos: Number(value.counts.videos || 0),
+    total: Number(value.counts.total || 0)
+  };
+  if (!value.deltaMode) return current;
+  const base = value.deltaBaselineCounts;
+  if (!base || !Number.isFinite(Number(base.total))) return null;
+  return {
+    images: Number(base.images || 0) + current.images,
+    videos: Number(base.videos || 0) + current.videos,
+    total: Number(base.total || 0) + current.total
+  };
+}
 function fmtTime(ms) {
   if (!ms) return '—';
   return new Date(ms).toLocaleString('ja-JP', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
@@ -138,7 +160,7 @@ function currentMediaKind() {
 }
 
 function archiveFilename(handle, archive, zipNumber) {
-  const safeHandle = String(target?.platform === 'bluesky' ? `bsky_${handle}` : handle || 'media').replace(/[\/:*?"<>|]/g, '').replace(/^@/, '') || 'media';
+  const safeHandle = String(target?.platform === 'bluesky' ? `bsky_${handle}` : target?.platform === 'threads' ? `threads_${handle}` : handle || 'media').replace(/[\/:*?"<>|]/g, '').replace(/^@/, '') || 'media';
   const kind = archive?.mediaKind || mediaKindFromSelection(archive?.selection);
   return `${safeHandle}_${archiveTimestamp(archive?.startedAt)}_${kind}_${String(zipNumber || 1).padStart(3, '0')}.zip`;
 }
@@ -228,13 +250,37 @@ function archiveIsRunning() {
   return state?.archive?.status === 'archiving';
 }
 
+function archiveReachedEndForDelta() {
+  const archive = state?.archive;
+  if (archive?.status !== 'archive_complete') return false;
+  const total = Number(archive.totalSelected || 0);
+  const next = Number(archive.nextItemIndex ?? archive.processedItems ?? 0);
+  return total >= 0 && next >= total;
+}
+
+function effectiveSavedKindsForDelta(field) {
+  const saved = { ...(state?.[field] || {}) };
+  if (archiveReachedEndForDelta()) {
+    if (state.archive?.selection?.images) saved.images = true;
+    if (state.archive?.selection?.videos) saved.videos = true;
+  }
+  return saved;
+}
+
 function canCheckNewMedia() {
-  if (state?.status !== 'complete' || !(target?.platform === 'bluesky' ? /^[a-zA-Z0-9._~-]{1,80}$/ : /^\d+$/).test(String(state.newestPostId || ''))) return false;
+  if (state?.status !== 'complete' || !(['bluesky','threads'].includes(target?.platform) ? target?.platform === 'threads' ? /^\d{5,30}$/ : /^[a-zA-Z0-9._~-]{1,80}$/ : /^\d+$/).test(String(state.newestPostId || ''))) return false;
   if (state.archive?.status !== 'archive_complete') return false;
-  if (!state.deltaMode) return true;
-  if (!state.deltaVerified) return false;
-  return (!state.counts?.images || state.deltaSavedKinds?.images === true) &&
-    (!state.counts?.videos || state.deltaSavedKinds?.videos === true);
+  if (state.deltaMode) {
+    if (!state.deltaVerified) return false;
+    const saved = effectiveSavedKindsForDelta('deltaSavedKinds');
+    return (!state.counts?.images || saved.images === true) &&
+      (!state.counts?.videos || saved.videos === true);
+  }
+  // 旧版には savedKinds が無い場合がある。その場合は従来互換で許可する。
+  if (!state.savedKinds || typeof state.savedKinds !== 'object') return true;
+  const saved = effectiveSavedKindsForDelta('savedKinds');
+  return (!state.counts?.images || saved.images === true) &&
+    (!state.counts?.videos || saved.videos === true);
 }
 
 function setArchiveUiLock(locked) {
@@ -252,10 +298,12 @@ function render() {
   const supported = !!target;
   els.targetHandle.textContent = supported ? `@${target.handle}` : '—';
   const isBsky = target?.platform === 'bluesky';
-  document.querySelector('.subtitle').textContent = isBsky ? 'Bluesky メディア一括保存' : 'X メディア一括保存';
-  els.targetHint.textContent = 'XまたはBlueskyのプロフィールを開いてください';
+  const isThreads = target?.platform === 'threads';
+  const isApi = isBsky || isThreads;
+  document.querySelector('.subtitle').textContent = isBsky ? 'Bluesky メディア一括保存' : isThreads ? 'Threads メディア一括保存' : 'X メディア一括保存';
+  els.targetHint.textContent = 'X／Bluesky／Threadsのプロフィールを開いてください';
   els.targetHint.classList.toggle('hidden', supported);
-  els.collectionModeRow.classList.toggle('hidden', !supported || isBsky);
+  els.collectionModeRow.classList.toggle('hidden', !supported || isApi);
 
   els.imageCount.textContent = fmtCount(state?.counts?.images);
   els.videoCount.textContent = fmtCount(state?.counts?.videos);
@@ -280,7 +328,7 @@ function render() {
     input.checked = input.value === shownMode;
     input.disabled = modeLocked;
   });
-  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || (isBsky && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || !state?.counts?.total));
+  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || (isApi && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || !state?.counts?.total));
   els.stopCollectBtn.disabled = archivingNow || confirmationActive || !(state?.status === 'collecting' || state?.status === 'rate_limited');
   setArchiveUiLock(archivingNow);
   els.resumeRow.classList.add('hidden');
@@ -323,30 +371,34 @@ function render() {
 
   if (!supported) {
     els.statusTitle.textContent = '対象ユーザーを確認できません';
-    els.statusDetail.textContent = 'XかBlueskyで保存したいユーザーのプロフィールを開いてください。';
+    els.statusDetail.textContent = 'X・Bluesky・Threadsで保存したいユーザーのプロフィールを開いてください。';
     setProgress('none');
     els.collectBtn.textContent = 'メディアを収集';
   } else if (!state) {
-    els.statusTitle.textContent = isBsky && !target.apiReady ? (target.apiError ? 'APIに接続できません' : 'Blueskyのアカウントを確認中…') : '準備完了';
-    els.statusDetail.textContent = isBsky ? (target.apiError || '公開APIで画像と動画をまとめて取得します。スクロール不要です。') : preferredCollectionMode === 'manual'
+    els.statusTitle.textContent = isApi && !target.apiReady ? (target.apiError ? 'APIに接続できません' : `${isThreads ? 'Threads' : 'Bluesky'}のアカウントを確認中…`) : '準備完了';
+    els.statusDetail.textContent = isApi ? (target.apiError || (isThreads ? '認証済みAPIで投稿メディアを取得します。スクロール不要です。' : '公開APIで画像と動画をまとめて取得します。スクロール不要です。')) : preferredCollectionMode === 'manual'
       ? '開始後はXの /media を自分でスクロールして収集します。'
       : '「メディアを収集」を押すと /media を順番に確認します。';
     setProgress('none');
     els.collectBtn.textContent = 'メディアを収集';
   } else {
     const total = state.counts?.total || 0;
+    const cumulative = cumulativeCountsForState(state);
+    const cumulativeLabel = state.deltaMode && cumulative ? ` / 累計 ${fmtCount(cumulative.total)}件` : '';
     const expected = Number(state.displayMediaCount || 0);
     const detailBase = state.deltaMode
-      ? `新規 ${fmtCount(total)}件 / 前回の投稿まで確認中`
-      : expected > 0 && !isBsky
+      ? `新規 ${fmtCount(total)}件${cumulativeLabel} / 前回の投稿まで確認中`
+      : expected > 0 && !isApi
       ? `${fmtCount(total)}件検出 / X表示 約${fmtCount(expected)}件`
       : `${fmtCount(total)}件検出`;
-    els.statusPanel.title = `開始: ${fmtTime(state.startedAt)}\n最終処理: ${fmtTime(state.updatedAt)}\n最新Post ID: ${state.newestPostId || '—'}\n最古Post ID: ${state.oldestPostId || '—'}\n${state.deltaMode ? `前回の境界: ${state.deltaBaselinePostId}\n` : ''}収集済み: ${fmtCount(total)}件`;
+    els.statusPanel.title = `開始: ${fmtTime(state.startedAt)}\n最終処理: ${fmtTime(state.updatedAt)}\n最新Post ID: ${state.newestPostId || '—'}\n最古Post ID: ${state.oldestPostId || '—'}\n${state.deltaMode ? `前回の境界: ${state.deltaBaselinePostId}\n` : ''}今回: ${fmtCount(total)}件${state.deltaMode && cumulative ? `\n累計: ${fmtCount(cumulative.total)}件` : ''}`;
 
     if (state.status === 'collecting') {
-      if (isBsky) {
-        els.statusTitle.textContent = state.deltaMode ? 'Blueskyの新規分を確認中…' : 'Bluesky APIから収集中…';
-        els.statusDetail.textContent = `${detailBase} / ${fmtCount(state.pagesFetched || 0)}ページ取得。画面を閉じても収集を続けます`;
+      if (isApi) {
+        const service = isThreads ? 'Threads' : 'Bluesky';
+        els.statusTitle.textContent = state.deltaMode ? `${service}の新規分を確認中…` : `${service} APIから収集中…`;
+        const scanned = Number(state.scannedPosts || 0);
+        els.statusDetail.textContent = `${detailBase}${scanned ? ` / ${fmtCount(scanned)}投稿確認` : ''} / ${fmtCount(state.pagesFetched || 0)}ページ取得。画面を閉じても収集を続けます`;
         setProgress('indeterminate');
         els.collectBtn.textContent = 'メディアを収集中';
       } else if (manualCollecting) {
@@ -378,15 +430,15 @@ function render() {
     } else if (state.status === 'paused') {
       const largeCancelled = state.pauseReason === 'large_cancelled';
       const resumeReady = state.pauseReason === 'resume_ready';
-      els.statusTitle.textContent = isBsky && state.pauseReason === 'rate_limit' ? 'Blueskyのアクセス制限で停止しました' : state.pauseReason === 'previous_missing'
+      els.statusTitle.textContent = isApi && state.pauseReason === 'rate_limit' ? `${isThreads ? 'Threads' : 'Bluesky'}のアクセス制限で停止しました` : state.pauseReason === 'previous_missing'
         ? '前回の収集状態を復元できません'
         : largeCancelled
         ? '大規模アカウントの収集を開始しませんでした'
         : resumeReady
           ? (state.rateLimitSimulated ? '疑似429テスト：手動再開待ち' : '待機時間が終了しました')
           : '前回の作業があります';
-      const reason = state.pauseReason === 'error' ? ` / ${state.lastError || 'エラーで停止'}` : '';
-      els.statusDetail.textContent = isBsky && state.pauseReason === 'rate_limit' ? `${detailBase} / ${fmtTime(state.resumeAt)}以降に手動で再開してください` : state.pauseReason === 'previous_missing'
+      const reason = ['error','auth'].includes(state.pauseReason) ? ` / ${state.lastError || 'エラーで停止'}` : '';
+      els.statusDetail.textContent = isApi && state.pauseReason === 'rate_limit' ? `${detailBase} / ${fmtTime(state.resumeAt)}以降に手動で再開してください` : state.pauseReason === 'previous_missing'
         ? state.lastError
         : largeCancelled
         ? `X表示 約${fmtCount(state.displayMediaCount)}件 / 大きな青ボタンから再度開始できます`
@@ -401,7 +453,9 @@ function render() {
         state.archive?.status === 'archive_complete' ? 'ZIP保存完了' : state.deltaMode ? '新規分の収集完了' : '収集完了';
       els.statusDetail.textContent = state.lastNewCheckResult === 0
         ? `前回の収集・ZIP情報はそのままです / 最終確認 ${fmtTime(state.lastNewCheckAt)}`
-        : `画像 ${fmtCount(state.counts?.images)}件 / 動画 ${fmtCount(state.counts?.videos)}件${state.deltaMode ? '（新規のみ）' : ''}`;
+        : state.deltaMode && cumulative
+          ? `今回 ${fmtCount(total)}件（画像 ${fmtCount(state.counts?.images)} / 動画 ${fmtCount(state.counts?.videos)}） / 累計 ${fmtCount(cumulative.total)}件`
+          : `画像 ${fmtCount(state.counts?.images)}件 / 動画 ${fmtCount(state.counts?.videos)}件${state.deltaMode ? '（新規のみ）' : ''}`;
       setProgress('none');
       els.collectBtn.textContent = '収集完了';
       els.resumeRow.classList.remove('hidden');
@@ -416,11 +470,19 @@ function render() {
   }
 
   const archive = state?.archive;
-  if (isBsky && target.apiError && archive?.status !== 'archiving') {
-    els.statusTitle.textContent = 'Blueskyの操作を確認してください';
+  if (isApi && target.apiError && archive?.status !== 'archiving') {
+    els.statusTitle.textContent = `${isThreads ? 'Threads' : 'Bluesky'}の操作を確認してください`;
     els.statusDetail.textContent = target.apiError;
   }
-  if (archive?.status === 'archiving') {
+  if (archiveStopPending && archive?.status !== 'archiving') archiveStopPending = false;
+  if (archiveStopPending && archive?.status === 'archiving') {
+    els.resumeRow.classList.add('hidden');
+    const p = Math.round((archive.progress || 0) * 100);
+    els.statusTitle.textContent = 'ZIP保存を停止しています…';
+    els.statusDetail.textContent = '作成途中のZIPを削除しています。完了後、最後に保存済みのZIPから再開できます。';
+    setProgress('determinate', p);
+    els.zipBtn.textContent = '停止処理中…';
+  } else if (archive?.status === 'archiving') {
     els.resumeRow.classList.add('hidden');
     const p = Math.round((archive.progress || 0) * 100);
     els.statusTitle.textContent = 'ZIPを作成中…';
@@ -462,9 +524,12 @@ function render() {
   } else if (archive?.status === 'archive_complete') {
     els.statusTitle.textContent = state?.lastNewCheckResult === 0 ? '新規メディアはありません' : 'ZIP保存完了';
     const savedTo = archive.saveDirectoryName ? ` / 保存先: ${archive.saveDirectoryName}` : '';
+    const cumulative = cumulativeCountsForState(state);
     els.statusDetail.textContent = state?.lastNewCheckResult === 0
       ? `前回のZIPを維持 / 保存先: ${archive.saveDirectoryName || '前回の保存先'}`
-      : `${fmtCount(archive.processedItems)}件を処理 / ${fmtCount(archive.savedZipCount)}個のZIPを保存${archive.failedItems ? ` / 取得失敗 ${fmtCount(archive.failedItems)}件` : ''}${savedTo}`;
+      : state?.deltaMode && cumulative
+        ? `今回 ${fmtCount(archive.processedItems)}件を処理 / 累計 ${fmtCount(cumulative.total)}件 / ${fmtCount(archive.savedZipCount)}個のZIPを保存${archive.failedItems ? ` / 取得失敗 ${fmtCount(archive.failedItems)}件` : ''}${savedTo}`
+        : `${fmtCount(archive.processedItems)}件を処理 / ${fmtCount(archive.savedZipCount)}個のZIPを保存${archive.failedItems ? ` / 取得失敗 ${fmtCount(archive.failedItems)}件` : ''}${savedTo}`;
     setProgress('determinate', 100);
     const selectedNow = (els.includeImages.checked ? Number(state?.counts?.images || 0) : 0) + (els.includeVideos.checked ? Number(state?.counts?.videos || 0) : 0);
     const sameSelection = currentMediaKind() === (archive.mediaKind || mediaKindFromSelection(archive.selection));
@@ -484,7 +549,7 @@ function render() {
   const sameSelectionAsArchive = currentMediaKind() === (state?.archive?.mediaKind || mediaKindFromSelection(state?.archive?.selection));
   const nothingNewAfterComplete = state?.archive?.status === 'archive_complete' && sameSelectionAsArchive && selectedNow <= Number(state.archive.totalSelected || 0);
   els.zipBtn.disabled = !canZip || !selectedNow || archiveIsRunning() || nothingNewAfterComplete;
-  els.stopZipBtn.disabled = !archiveIsRunning();
+  els.stopZipBtn.disabled = !archiveIsRunning() || archiveStopPending;
 }
 
 async function refresh() {
@@ -517,14 +582,37 @@ async function bskyPermissionReady() {
   }
 }
 
+async function threadsMediaPermissionReady() {
+  if (target?.platform !== 'threads') return true;
+  const urls = (state?.items || []).filter(item => item.type === 'image' ? els.includeImages.checked : els.includeVideos.checked).map(item => item.url);
+  if (urls.some(url => !url)) { setNotice('ThreadsのメディアURLがありません。再収集してからZIP保存してください', true); return false; }
+  const origins = [...new Set(urls.map(url => {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== 'https:' || !/(?:^|\.)(?:cdninstagram\.com|fbcdn\.net)$/.test(u.hostname)) return null;
+      return `${u.origin}/*`;
+    } catch { return null; }
+  }))];
+  if (origins.includes(null) || origins.length > 20) { setNotice('Threadsの配信先が不明です。URLを再取得してください', true); return false; }
+  try {
+    const pending = [];
+    for (const origin of origins) if (!await chrome.permissions.contains({origins:[origin]})) pending.push(origin);
+    if (pending.length && !await chrome.permissions.request({origins:pending})) {
+      setNotice('Threadsの画像・動画配信先へのアクセス許可が必要です',true);
+      return false;
+    }
+    return true;
+  } catch { setNotice('Threadsの配信先へのアクセス許可を確認できません',true); return false; }
+}
+
 async function beginCollection(restart) {
   manualFinishFeedback = '';
-  if (target?.platform === 'bluesky') {
-    if (!target.apiReady || !await bskyPermissionReady()) return;
+  if (['bluesky','threads'].includes(target?.platform)) {
+    if (!target.apiReady || (target.platform === 'bluesky' && !await bskyPermissionReady())) return;
     const result = await chrome.runtime.sendMessage({
-      type:'SMZ_BSKY_START_COLLECTION', handle:target.handle, restart
+      type:target.platform === 'threads' ? 'SMZ_THREADS_START_COLLECTION' : 'SMZ_BSKY_START_COLLECTION', handle:target.handle, restart
     });
-    if (!result?.ok) { target.apiError = result?.error || 'Blueskyから収集できませんでした'; }
+    if (!result?.ok) { target.apiError = result?.error || `${target.platform === 'threads' ? 'Threads' : 'Bluesky'}から収集できませんでした`; }
     else { state = result.state; target.apiError = null; }
     render();
     return;
@@ -546,8 +634,8 @@ async function checkNewMedia() {
   setNotice('');
   els.newOnlyBtn.disabled = true;
   if (target.platform === 'bluesky' && !await bskyPermissionReady()) return;
-  const result = await chrome.runtime.sendMessage(target.platform === 'bluesky' ? {
-    type:'SMZ_BSKY_START_COLLECTION', handle:target.handle, newOnly:true
+  const result = await chrome.runtime.sendMessage(['bluesky','threads'].includes(target.platform) ? {
+    type:target.platform === 'threads' ? 'SMZ_THREADS_START_COLLECTION' : 'SMZ_BSKY_START_COLLECTION', handle:target.handle, newOnly:true
   } : {
     type: 'SMZ_START_COLLECTION', platform: 'x', handle: target.handle,
     tabId: activeTab.id, newOnly: true, collectionMode: preferredCollectionMode,
@@ -555,7 +643,12 @@ async function checkNewMedia() {
   });
   if (result?.ok) state = result.state;
   render();
-  if (!result?.ok) setNotice(result?.error || '新規分の確認を開始できませんでした', true);
+  if (!result?.ok) {
+    const message = result?.error || '新規分の確認を開始できませんでした';
+    const isSafetyGuide = message === '差分確認前に前回のZIP保存を完了してください' ||
+      message === '差分チェック前に前回のZIP保存を完了してください';
+    setNotice(message, !isSafetyGuide);
+  }
 }
 
 els.newOnlyBtn.addEventListener('click', checkNewMedia);
@@ -563,7 +656,7 @@ els.newOnlyBtn.addEventListener('click', checkNewMedia);
 els.optionsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
 els.collectBtn.addEventListener('click', async () => {
   if (!target) return;
-  if (target?.platform !== 'bluesky' && state?.status === 'collecting' && state.collectionMode === 'manual') {
+  if (!['bluesky','threads'].includes(target?.platform) && state?.status === 'collecting' && state.collectionMode === 'manual') {
     if (manualFinishBusy) return;
     manualFinishBusy = true;
     manualFinishFeedback = '';
@@ -589,7 +682,7 @@ els.collectBtn.addEventListener('click', async () => {
   await beginCollection(!state);
 });
 els.stopCollectBtn.addEventListener('click', async () => {
-  const result = await chrome.runtime.sendMessage(target?.platform === 'bluesky' ? { type:'SMZ_BSKY_STOP_COLLECTION',handle:target.handle } : { type:'SMZ_STOP_COLLECTION', platform:'x', handle:target.handle, tabId:activeTab.id });
+  const result = await chrome.runtime.sendMessage(['bluesky','threads'].includes(target?.platform) ? { type:target.platform === 'threads' ? 'SMZ_THREADS_STOP_COLLECTION' : 'SMZ_BSKY_STOP_COLLECTION',handle:target.handle } : { type:'SMZ_STOP_COLLECTION', platform:'x', handle:target.handle, tabId:activeTab.id });
   if (!result?.ok) setNotice(result?.error || '停止できませんでした', true);
   await refresh();
 });
@@ -623,7 +716,7 @@ els.confirmActionBtn.addEventListener('click', async () => {
     const returnToPrevious = state?.deltaMode && !Number(state.archive?.savedZipCount || 0);
     const directoryKey = state?.archive?.saveDirectoryKey || state?.preferredSaveDirectoryKey || null;
     const result = await chrome.runtime.sendMessage({
-      type: returnToPrevious ? (target?.platform === 'bluesky' ? 'SMZ_BSKY_CANCEL_DELTA' : 'SMZ_CANCEL_DELTA') : 'SMZ_RESET_COLLECTION', platform:target?.platform || 'x', handle:target.handle
+      type: returnToPrevious ? (target?.platform === 'bluesky' ? 'SMZ_BSKY_CANCEL_DELTA' : target?.platform === 'threads' ? 'SMZ_THREADS_CANCEL_DELTA' : 'SMZ_CANCEL_DELTA') : 'SMZ_RESET_COLLECTION', platform:target?.platform || 'x', handle:target.handle
     });
     pendingConfirmation = null;
     if (!result?.ok) {
@@ -659,6 +752,7 @@ async function startArchive() {
     return;
   }
   if (target?.platform === 'bluesky' && !await bskyPermissionReady()) return;
+  if (target?.platform === 'threads' && !await threadsMediaPermissionReady()) return;
   const destination = await prepareSaveDestination();
   if (destination.cancelled) {
     setNotice('保存先フォルダの選択をキャンセルしました。');
@@ -685,8 +779,17 @@ async function startArchive() {
 
 els.zipBtn.addEventListener('click', startArchive);
 els.stopZipBtn.addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({ type:'SMZ_STOP_ARCHIVE' });
-  setNotice('現在の未完成ZIPを破棄して安全に停止します。');
+  if (!archiveIsRunning() || archiveStopPending) return;
+  archiveStopPending = true;
+  noticeUntil = 0;
+  setNotice('');
+  render();
+  const result = await chrome.runtime.sendMessage({ type:'SMZ_STOP_ARCHIVE' });
+  if (!result?.ok) {
+    archiveStopPending = false;
+    setNotice(result?.error || 'ZIP保存を停止できませんでした', true);
+  }
+  await refresh();
 });
 document.querySelectorAll('input[name="collectionMode"]').forEach((input) => {
   input.addEventListener('change', async () => {
@@ -718,10 +821,10 @@ document.querySelectorAll('input[name="split"], input[name="downloadLimit"]').fo
   [activeTab] = await chrome.tabs.query({ active:true, currentWindow:true });
   target = parseTarget(activeTab?.url || '');
   await loadSettings();
-  if (target?.platform === 'bluesky') {
-    const result = await chrome.runtime.sendMessage({ type:'SMZ_BSKY_GET_PROFILE',actor:target.handle });
+  if (['bluesky','threads'].includes(target?.platform)) {
+    const result = await chrome.runtime.sendMessage({ type:target.platform === 'threads' ? 'SMZ_THREADS_GET_PROFILE' : 'SMZ_BSKY_GET_PROFILE',actor:target.handle });
     if (result?.ok) { target.handle = result.profile.handle; target.did = result.profile.did; target.pds = result.pds; target.apiReady = true; }
-    else target.apiError = result?.error || 'Blueskyのプロフィールを取得できません';
+    else target.apiError = result?.error || `${target.platform === 'threads' ? 'Threads' : 'Bluesky'}のプロフィールを取得できません`;
   }
   // 緑の完了チェックは、ユーザーが拡張アイコンを押してポップアップを開いた時点で確認済みにする。
   // ZIP完了そのものの状態は残るので、対象アカウントでは引き続き「ZIP保存完了」を確認できる。

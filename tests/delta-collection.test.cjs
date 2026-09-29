@@ -63,6 +63,7 @@ async function testNewOnly() {
   assert.equal(state.status, 'collecting');
   assert.equal(state.deltaMode, true);
   assert.equal(state.deltaBaselinePostId, '2100');
+  assert.deepEqual(state.deltaBaselineCounts, { images: 2, videos: 1, total: 3 });
   assert.equal(state.counts.total, 0);
   assert.equal(state.archive, null);
   assert.equal(state.preferredSaveDirectoryName, 'X Backup');
@@ -111,6 +112,7 @@ async function testNewOnly() {
   assert.equal(r.ok, true, r.error);
   state = h.collections.smz_collection_x_demo;
   assert.equal(state.deltaBaselinePostId, '2200');
+  assert.deepEqual(state.deltaBaselineCounts, { images: 3, videos: 2, total: 5 });
   assert.equal(state.counts.total, 0);
   const secondId = state.collectionId;
   // 最新側に新規がない場合、前回のZIP情報を丸ごと復元する。
@@ -178,6 +180,27 @@ async function testPauseResumeAndNoNew() {
   console.log('PASS delta pause/resume: no early manual completion, preserve partial items, avoid duplicate, restore unsaved previous state when no new');
 }
 
+async function testCompletedArchiveWithFailureCanStartDelta() {
+  const completedWithFailure = {
+    ...previous,
+    savedKinds: { images: false, videos: false },
+    archive: {
+      ...previous.archive,
+      nextItemIndex: 3, processedItems: 3, failedItems: 1, totalSelected: 3,
+      selection: { images: true, videos: true },
+      failures: [{ key: '2090_1', error: '取得に失敗' }]
+    }
+  };
+  const h = harness(completedWithFailure);
+  await tick();
+  const r = await h.send({ type: 'SMZ_START_COLLECTION', handle: 'demo', tabId: 11, collectionMode: 'manual', newOnly: true });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.state.deltaMode, true);
+  assert.equal(r.state.deltaBaselinePostId, '2100');
+  assert.equal(h.collections.smz_previous_collection_x_demo.archive.failedItems, 1, 'failure history stays visible in previous checkpoint');
+  console.log('PASS delta after failed item: archive_complete + end-of-list can start a later delta without hiding the recorded failure');
+}
+
 async function testUnsavedGuardAndRollback() {
   const unarchived = harness({ ...previous, archive: null });
   await tick();
@@ -201,7 +224,7 @@ async function testUnsavedGuardAndRollback() {
   console.log('PASS delta safety: block unsaved full collection; user can discard paused delta and recover previous ZIP state');
 }
 
-(async () => { await testNewOnly(); await testPauseResumeAndNoNew(); await testUnsavedGuardAndRollback();
+(async () => { await testNewOnly(); await testPauseResumeAndNoNew(); await testCompletedArchiveWithFailureCanStartDelta(); await testUnsavedGuardAndRollback();
   console.log('PASS v0.0.20 delta offline regression suite'); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });
 

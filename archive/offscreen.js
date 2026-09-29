@@ -41,10 +41,10 @@ function mediaKindFromSelection(selection) {
   return 'media';
 }
 
-function archiveRoot(job) { return safeName(job.platform === 'bluesky' ? `bsky_${job.handle}` : job.handle); }
+function archiveRoot(job) { return safeName(job.platform === 'bluesky' ? `bsky_${job.handle}` : job.platform === 'threads' ? `threads_${job.handle}` : job.handle); }
 
 function archiveFilename(handle, startedAt, mediaKind, zipNumber, platform = 'x') {
-  return `${safeName(platform === 'bluesky' ? `bsky_${handle}` : handle)}_${archiveTimestamp(startedAt)}_${mediaKind || 'media'}_${String(zipNumber).padStart(3, '0')}.zip`;
+  return `${safeName(platform === 'bluesky' ? `bsky_${handle}` : platform === 'threads' ? `threads_${handle}` : handle)}_${archiveTimestamp(startedAt)}_${mediaKind || 'media'}_${String(zipNumber).padStart(3, '0')}.zip`;
 }
 
 function mimeExtension(contentType, fallback) {
@@ -72,7 +72,7 @@ async function fetchMedia(item) {
       // 一部PDSは、取得失敗時に200でHTML/JSONのエラー本文を返す可能性がある。
       // 画像・動画のファイル名でエラーページを保存しないよう、BlueskyのBlobのみ検査する。
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-      if (item.platform === 'bluesky' && /^(?:text\/html|application\/(?:json|problem\+json))\b/.test(contentType)) {
+      if (['bluesky','threads'].includes(item.platform) && /^(?:text\/html|application\/(?:json|problem\+json))\b/.test(contentType)) {
         throw new Error(`メディアではない応答 (${contentType})`);
       }
       const buffer = await response.arrayBuffer();
@@ -786,6 +786,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'SMZ_OFFSCREEN_REMOVE_HANDLES') {
+    if (activeJob) { sendResponse({ok:false,error:'ZIP保存中は削除できません'}); return true; }
+    Promise.resolve().then(async () => {
+      if (!Array.isArray(message.keys) || message.keys.length > 2000) throw new Error('削除する保存先が不正です');
+      for (const key of message.keys) {
+        if (typeof key !== 'string' || !/^archive-directory:[a-zA-Z0-9._-]{1,100}$/.test(key)) throw new Error('保存先が不正です');
+        await SMZFileSystem.removeHandle(key);
+      }
+    }).then(() => sendResponse({ok:true})).catch(() => sendResponse({ok:false,error:'保存先情報を削除できませんでした'}));
+    return true;
+  }
   if (message.type === 'SMZ_OFFSCREEN_CLEAR_HANDLES') {
     if (activeJob) {
       sendResponse({ ok: false, error: 'ZIP保存中は初期化できません' });

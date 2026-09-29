@@ -8,7 +8,7 @@
   const MAX_ITEMS = 120000;
   const MAX_ACCOUNTS = 1000;
   const MAX_JSON_CHARS = 128 * 1024 * 1024;
-  const itemFields = ['postedAt', 'extension', 'sourceType', 'cid'];
+  const itemFields = ['postedAt', 'extension', 'sourceType', 'cid', 'mediaId'];
   const stateStringFields = ['collectionId', 'collectionMode', 'status', 'pauseReason', 'collectionPhase',
     'newestPostId', 'oldestPostId', 'deltaBaselinePostId', 'deltaEndReason', 'resumeCursor'];
   const stateNumFields = ['schemaVersion', 'startedAt', 'updatedAt', 'completedAt', 'displayMediaCount',
@@ -23,6 +23,33 @@
   function num(v) { return typeof v === 'number' && Number.isFinite(v) ? v : null; }
   function positiveInt(v, fallback = 0) {
     return Number.isSafeInteger(v) && v >= 0 ? v : fallback;
+  }
+  function safeCounts(v) {
+    if (!plain(v)) return null;
+    const images = positiveInt(v.images, -1);
+    const videos = positiveInt(v.videos, -1);
+    const total = positiveInt(v.total, -1);
+    if (images < 0 || videos < 0 || total < 0 || images + videos !== total) return null;
+    return { images, videos, total };
+  }
+  // 差分ZIPは「今回分」だけをitemsに持つ。deltaBaselineCountsに前回までの累計を
+  // 持たせることで、最新の差分ZIP 1個だけでも累計件数を復元できる。
+  function cumulativeCounts(state) {
+    if (!plain(state)) return null;
+    const current = safeCounts(state.counts);
+    if (!current) return null;
+    if (state.deltaMode === true) {
+      const base = safeCounts(state.deltaBaselineCounts);
+      if (!base) return null;
+      return { images: base.images + current.images, videos: base.videos + current.videos, total: base.total + current.total };
+    }
+    return current;
+  }
+  function backfillDeltaBaseline(current, previous) {
+    if (!current?.deltaMode || safeCounts(current.deltaBaselineCounts)) return current;
+    const base = cumulativeCounts(previous);
+    if (base) current.deltaBaselineCounts = base;
+    return current;
   }
   function safePdsOrigin(input) {
     if (typeof input !== 'string' || input.length > 255) return null;
@@ -40,6 +67,11 @@
     try {
       const url = new URL(input);
       if (url.protocol !== 'https:' || url.username || url.password) return null;
+      if (platform === 'threads') {
+        if (!/(?:^|\.)(?:cdninstagram\.com|fbcdn\.net)$/.test(url.hostname.toLowerCase())) return null;
+        if (url.port || [...url.searchParams.keys()].some(k => /(?:access.?token|authorization|client.?secret|app.?secret|api.?key|password)/i.test(k))) return null;
+        return url.toString(); // CDN signatures are temporary media URLs, never OAuth tokens.
+      }
       if (platform === 'bluesky') {
         if (url.hostname.toLowerCase() === 'cdn.bsky.app' && /^\/img\//.test(url.pathname)) {
           return `${url.origin}${url.pathname}`;
@@ -65,7 +97,7 @@
   function safeItem(v, platform = 'x') {
     if (!plain(v) || (platform === 'x'
       ? !/^\d{1,24}$/.test(String(v.postId || ''))
-      : !/^[a-zA-Z0-9._~-]{1,80}$/.test(String(v.postId || '')))) return null;
+      : platform === 'threads' ? !/^\d{5,30}$/.test(String(v.postId || '')) : !/^[a-zA-Z0-9._~-]{1,80}$/.test(String(v.postId || '')))) return null;
     const mediaIndex = positiveInt(v.mediaIndex);
     if (mediaIndex < 1 || mediaIndex > 200) return null;
     const type = v.type === 'video' ? 'video' : v.type === 'image' ? 'image' : null;
@@ -99,10 +131,10 @@
     return out;
   }
   function safeCollection(v) {
-    if (!plain(v) || !['x','bluesky'].includes(v.platform)) throw new Error('未対応のアカウント状態です');
+    if (!plain(v) || !['x','bluesky','threads'].includes(v.platform)) throw new Error('未対応のアカウント状態です');
     const platform = v.platform;
     const handle = str(v.handle, 253)?.replace(/^@/, '').toLowerCase();
-    if (!handle || (platform === 'x' ? !/^[a-z0-9_]{1,30}$/.test(handle) :
+    if (!handle || (platform === 'x' ? !/^[a-z0-9_]{1,30}$/.test(handle) : platform === 'threads' ? !/^[a-z0-9_](?:[a-z0-9._]{0,28}[a-z0-9_])?$/.test(handle) || handle.includes('..') :
       !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$/.test(handle))) throw new Error('アカウント名が不正です');
     if (platform === 'bluesky' && !/^did:(?:plc:[a-z2-7]{24}|web:[a-z0-9.:%_-]+)$/i.test(String(v.did || ''))) {
       throw new Error('BlueskyのDIDが不正です');
@@ -116,6 +148,7 @@
       videos: items.filter((x) => x.type === 'video').length,
       total: items.length
     } };
+    if (platform === 'threads') out.ownProfile = v.ownProfile === true;
     if (platform === 'bluesky') { out.did = v.did; out.pds = safePdsOrigin(v.pds); }
     for (const f of stateStringFields) { const s = str(v[f], 300); if (s !== null) out[f] = s; }
     for (const f of stateNumFields) { const n = num(v[f]); if (n !== null) out[f] = n; }
@@ -123,26 +156,38 @@
       if (typeof v[f] === 'boolean') out[f] = v[f];
     }
     out.deltaOlderPostIds = (Array.isArray(v.deltaOlderPostIds) ? v.deltaOlderPostIds : [])
-      .filter((id) => platform === 'x' ? /^\d{1,24}$/.test(String(id)) : /^[a-zA-Z0-9._~-]{1,80}$/.test(String(id))).slice(0, 6).map(String);
+      .filter((id) => platform === 'x' ? /^\d{1,24}$/.test(String(id)) : platform === 'threads' ? /^\d{5,30}$/.test(String(id)) : /^[a-zA-Z0-9._~-]{1,80}$/.test(String(id))).slice(0, 6).map(String);
     for (const f of ['deltaSavedKinds','savedKinds']) {
       out[f] = { images: v[f]?.images === true, videos: v[f]?.videos === true };
     }
+    const baselineCounts = safeCounts(v.deltaBaselineCounts);
+    if (baselineCounts) out.deltaBaselineCounts = baselineCounts;
     out.archive = safeArchive(v.archive);
     if (out.archive?.status === 'archive_complete' &&
-        (Number(out.archive.failedItems || 0) > 0 ||
-          Number(out.archive.nextItemIndex || 0) < Number(out.archive.totalSelected || 0))) {
+        Number(out.archive.nextItemIndex || 0) < Number(out.archive.totalSelected || 0)) {
       out.archive.status = 'archive_paused';
       out.archive.pauseReason = 'imported_incomplete';
     }
-    // 過去データが両方保存済みと分かる場合のみ復元候補として補完する。
-    if (!v.savedKinds && out.archive?.status === 'archive_complete' && !out.archive.failedItems) {
-      const sel = out.archive.selection;
-      if (Number(out.archive.nextItemIndex) >= Number(out.archive.totalSelected)) {
-        if (sel.images) out.savedKinds.images = true;
-        if (sel.videos) out.savedKinds.videos = true;
-      }
+    // v1.3.0初期テスト版は、最終ZIPに取得失敗が1件でもあると safeCollection() が
+    // archive_complete を imported_incomplete へ誤変換していた。全件処理済み・完了時刻ありなら
+    // 旧ZIPも完了状態へ戻し、復元直後に不要な「ZIP保存を再開」を出さない。
+    if (out.archive?.status === 'archive_paused' && out.archive.pauseReason === 'imported_incomplete' &&
+        Number(out.archive.totalSelected || 0) > 0 &&
+        Number(out.archive.nextItemIndex || 0) >= Number(out.archive.totalSelected || 0) &&
+        Number(out.archive.completedAt || 0) > 0) {
+      out.archive.status = 'archive_complete';
+      out.archive.pauseReason = null;
     }
-    out.collectionMode = platform === 'bluesky' ? 'api' : out.collectionMode === 'manual' ? 'manual' : 'auto';
+    // 取得失敗は完了ステータスと併存できる。失敗項目は failures / failedItems で通知する。
+    // archive_complete かつ末尾まで処理済みなら、失敗件数が残っていても選択した種別は
+    // 「保存処理完了」として扱う。これにより1件の取得失敗で次回差分が永久に塞がれない。
+    if (out.archive?.status === 'archive_complete' &&
+        Number(out.archive.nextItemIndex ?? out.archive.processedItems ?? 0) >= Number(out.archive.totalSelected || 0)) {
+      const sel = out.archive.selection || {};
+      if (sel.images) out.savedKinds.images = true;
+      if (sel.videos) out.savedKinds.videos = true;
+    }
+    out.collectionMode = ['bluesky','threads'].includes(platform) ? 'api' : out.collectionMode === 'manual' ? 'manual' : 'auto';
     out.status = out.status === 'complete' ? 'complete' : 'paused';
     out.pauseReason = out.status === 'paused' ? 'imported' : null;
     out.collectionPhase = null;
@@ -177,17 +222,19 @@
     };
   }
   function accountEnvelope(current, previous = null, source = {}) {
+    const safePrevious = previous ? safeCollection(previous) : null;
+    const safeCurrent = backfillDeltaBaseline(safeCollection(current), safePrevious);
     return {
       format: ACCOUNT_FORMAT, version: VERSION, exportedAt: new Date().toISOString(),
       source: { zipNumber: positiveInt(source.zipNumber), mediaKind: ['media','images','videos'].includes(source.mediaKind) ? source.mediaKind : null },
-      account: safeCollection(current), previous: previous ? safeCollection(previous) : null
+      account: safeCurrent, previous: safePrevious
     };
   }
   function fullEnvelope(storage) {
     const keys = Object.keys(storage || {});
     const handles = new Set();
     for (const key of keys) {
-      const found = /^smz_(?:previous_)?collection_(x|bluesky)_(.+)$/.exec(key);
+      const found = /^smz_(?:previous_)?collection_(x|bluesky|threads)_(.+)$/.exec(key);
       if (found) handles.add(`${found[1]}_${found[2]}`);
     }
     if (handles.size > MAX_ACCOUNTS) throw new Error('アカウント数が上限を超えています');
@@ -198,7 +245,8 @@
       const current = storage[`smz_collection_${platform}_${handle}`] || null;
       const previous = storage[`smz_previous_collection_${platform}_${handle}`] || null;
       if (!current) continue;
-      accounts.push({ current: safeCollection(current), previous: previous ? safeCollection(previous) : null });
+      const safePrevious = previous ? safeCollection(previous) : null;
+      accounts.push({ current: backfillDeltaBaseline(safeCollection(current), safePrevious), previous: safePrevious });
     }
     return { format: FULL_FORMAT, version: VERSION, exportedAt: new Date().toISOString(),
       settings: safeSettings(storage?.smz_user_settings_v1), accounts };
@@ -210,9 +258,10 @@
       const item = input.account ? { current: input.account, previous: input.previous } :
         Array.isArray(input.accounts) && input.accounts.length === 1 ? input.accounts[0] : null;
       if (!item) throw new Error('アカウント別ZIPの形式が不正です');
-      const current = safeCollection(item.current);
+      let current = safeCollection(item.current);
       const previous = item.previous ? safeCollection(item.previous) : null;
       if (previous && (previous.handle !== current.handle || previous.platform !== current.platform)) throw new Error('前回データのアカウントが一致しません');
+      current = backfillDeltaBaseline(current, previous);
       return { format: ACCOUNT_FORMAT, version: VERSION,
         source: { zipNumber: positiveInt(input.source?.zipNumber),
           mediaKind: ['media','images','videos'].includes(input.source?.mediaKind) ? input.source.mediaKind : null },
@@ -222,19 +271,20 @@
       throw new Error('シンプルまるごとZIPのバックアップではありません');
     }
     const accounts = input.accounts.map((entry) => {
-      const current = safeCollection(entry.current);
+      let current = safeCollection(entry.current);
       const previous = entry.previous ? safeCollection(entry.previous) : null;
       if (previous && (previous.handle !== current.handle || previous.platform !== current.platform)) throw new Error('前回データのアカウントが一致しません');
+      current = backfillDeltaBaseline(current, previous);
       return { current, previous };
     });
     if (new Set(accounts.map((v) => `${v.current.platform}:${v.current.handle}`)).size !== accounts.length) throw new Error('同じアカウントが重複しています');
-    return { format: FULL_FORMAT, version: VERSION, accounts,
-      settings: safeSettings(input.settings), exportedAt: str(input.exportedAt, 50) };
+    return { format: FULL_FORMAT, version: VERSION, accounts, partial: input.partial === true,
+      settings: input.partial === true ? null : safeSettings(input.settings), exportedAt: str(input.exportedAt, 50) };
   }
   function parseJson(text) {
     if (typeof text !== 'string' || text.length > MAX_JSON_CHARS) throw new Error('JSONファイルが大きすぎます');
     return normalizeImport(JSON.parse(text));
   }
-  globalThis.SMZBackup = Object.freeze({ ACCOUNT_FORMAT, FULL_FORMAT, VERSION, safeCollection,
+  globalThis.SMZBackup = Object.freeze({ ACCOUNT_FORMAT, FULL_FORMAT, VERSION, safeCollection, cumulativeCounts,
     safeSettings, accountEnvelope, fullEnvelope, normalizeImport, parseJson });
 })();

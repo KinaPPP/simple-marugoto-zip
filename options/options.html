@@ -10,79 +10,166 @@
   <main>
     <header class="page-header">
       <img src="../icons/icon48.png" width="48" height="48" alt="" class="app-icon">
-      <div><h1>シンプルまるごとZIP <span>v1.2.0</span></h1><p>設定・バックアップ</p></div>
+      <div class="page-title"><h1>シンプルまるごとZIP <span>v1.3.0</span></h1><p>設定</p></div>
+      <a class="header-help" href="../README.md" target="_blank" rel="noopener">README ↗</a>
     </header>
 
-    <section class="backup" aria-labelledby="backupTitle">
-      <h2 id="backupTitle">バックアップと復元</h2>
-      <div class="backup-grid">
-        <div class="backup-panel export-panel">
-          <h3>全体JSONを保存</h3>
-          <button class="primary" id="exportBackupBtn" type="button">JSONをエクスポート</button>
-          <p class="feedback" id="exportFeedback" role="status" aria-live="polite"></p>
+    <nav class="settings-tabs" role="tablist" aria-label="設定カテゴリ">
+      <button class="settings-tab is-active" id="tab-services" type="button" role="tab" aria-selected="true" aria-controls="panel-services" data-tab="services">対応サービス</button>
+      <button class="settings-tab" id="tab-backup" type="button" role="tab" aria-selected="false" aria-controls="panel-backup" data-tab="backup">バックアップ・復元</button>
+      <button class="settings-tab" id="tab-data" type="button" role="tab" aria-selected="false" aria-controls="panel-data" data-tab="data">保存データ</button>
+    </nav>
+
+    <div class="tab-panel is-active" id="panel-services" role="tabpanel" aria-labelledby="tab-services" data-tab-panel="services">
+      <section class="intro-card" aria-labelledby="serviceTitle">
+        <div>
+          <h2 id="serviceTitle">対応サービス</h2>
+          <p>X・Bluesky・Threadsの投稿メディアを収集し、画像・動画をZIPで保存します。</p>
         </div>
-        <div class="backup-panel import-panel">
-          <h3>ZIP／JSONから復元</h3>
-          <div class="drop-target" id="backupDropZone" tabindex="0" role="button" aria-label="ZIPまたはJSONを読み込む">
-            <strong>ZIP／JSONをここにドロップ</strong>
-            <span>またはクリックして選択</span>
+        <span class="service-count">3サービス対応</span>
+      </section>
+
+      <section class="service-card service-x" aria-labelledby="xServiceTitle">
+        <div class="service-card-head">
+          <div><h2 id="xServiceTitle">X</h2><p>Chromeのログインを利用</p></div>
+          <span class="badge connected">対応中</span>
+        </div>
+        <div class="service-settings">
+          <label class="x-option"><input type="checkbox" id="xSplitMedia" checked>
+            画像／動画に分かれた新UIから収集する（推奨）
+          </label>
+          <p class="muted option-note">自動収集では動画と画像を順番に確認して同一アカウントへまとめます。手動収集では必要なページを手動で切り替えてください。</p>
+          <label class="x-option"><input type="checkbox" id="xRevertProfileTabs">
+            Xのプロフィールタブを旧表示に戻す（通常OFF）
+          </label>
+          <p class="muted option-note">X本体の表示にも影響します。Control Panel for Twitterの同種設定を使っている場合はOFFのままで構いません。</p>
+          <p class="feedback" id="xOptionsFeedback" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="service-card service-bluesky" aria-labelledby="bskyServiceTitle">
+        <div class="service-card-head compact">
+          <div><h2 id="bskyServiceTitle">Bluesky</h2><p>公開APIを利用・ログイン不要</p></div>
+          <span class="badge connected">対応中</span>
+        </div>
+        <p class="muted service-summary">追加設定はありません。プロフィールを開いてポップアップから収集できます。</p>
+      </section>
+
+      <section class="service-card service-threads threads-auth" aria-labelledby="threadsAuthTitle">
+        <div class="service-card-head compact threads-title-row">
+          <div>
+            <h2 id="threadsAuthTitle">Threads</h2>
+            <p class="threads-lead">APIの利用・長期トークンの取得にはMetaアプリの登録が必要です。<a href="https://kinappp.github.io/threads-token-tool/" rel="noopener noreferrer" target="_blank">Threadsトークン 取トーくんを開く ↗</a></p>
           </div>
-          <input type="file" accept=".zip,.json,application/zip,application/json" id="backupFileInput" hidden>
+          <div class="threads-auth-head"><span id="threadsAuthBadge" class="badge">未接続</span><strong id="threadsAuthUsername"></strong></div>
         </div>
-      </div>
-      <p id="importFeedback" class="feedback" role="status" aria-live="polite"></p>
-      <div class="import-result" id="importResult" hidden>
-        <div class="result-head"><span class="result-check" aria-hidden="true">✓</span>
-          <div><strong id="importResultText">復元しました</strong><small id="importSourceText"></small></div>
+        <p class="muted threads-storage-note">長期トークンはこのPCのChrome内に保存されます。共有PCでの利用にはご注意ください。</p>
+
+        <div class="threads-status-row">
+          <label class="threads-auto-renew"><input type="checkbox" id="threadsAutoRenew" checked disabled>有効期限が近づいたら自動更新する（初期値ON）</label>
+          <span id="threadsExpiry" class="muted" aria-live="polite">接続されていません</span>
+          <span id="threadsAuthFeedback" class="feedback threads-feedback" role="status" aria-live="polite"></span>
         </div>
-        <button class="subtle" id="replaceAccountsBtn" type="button" hidden>同じアカウントを上書き</button>
-        <details class="import-advanced" id="importAdvanced">
-          <summary>詳細な復元操作</summary>
-          <div id="importAccounts" class="account-preview"></div>
-          <p id="importWarning" class="import-warning" hidden></p>
-          <button id="replaceAllBtn" class="danger-outline" type="button" hidden>このJSONで全体を置き換える</button>
-        </details>
-        <div class="inline-confirm" id="importConfirmBox" hidden>
-          <strong id="importConfirmText">現在の状態を置き換えますか？</strong>
-          <div class="confirm-actions"><button type="button" id="cancelImportBtn" class="secondary">いいえ</button>
-          <button type="button" id="applyImportBtn" class="danger">はい、置き換える</button></div>
+
+        <div class="threads-token-row">
+          <input id="threadsTokenInput" class="form-control" type="text" spellcheck="false" autocomplete="off" placeholder="取得した長期トークンを貼り付け" aria-label="長期アクセストークン">
+          <button id="threadsConnectBtn" class="primary threads-save-btn" type="button">トークンを保存</button>
+          <button type="button" id="threadsRefreshBtn" class="secondary threads-refresh-btn" disabled>今すぐ更新</button>
         </div>
-      </div>
-      <div class="help-link"><a href="../README.md" target="_blank" rel="noopener">詳しい仕様はREADMEへ ↗</a></div>
-    </section>
+        <p class="muted threads-renew-note">自動更新はChromeの起動中に実行されます。期限切れやMeta側で許可を取り消した場合は再認証が必要です。</p>
 
-    <details class="more-section" id="xCompatibilityOptions">
-      <summary>Xの新旧メディア表示（詳細設定）</summary>
-      <label class="x-option"><input type="checkbox" id="xSplitMedia" checked>
-        画像／動画に分かれた新UIから収集する（推奨）
-      </label>
-      <p class="muted">自動収集では動画と画像を順番に確認して、同一アカウントへまとめます。手動収集では必要なページを手動で切り替えてください。</p>
-      <label class="x-option"><input type="checkbox" id="xRevertProfileTabs">
-        Xのプロフィールタブを旧表示に戻す（通常OFF）
-      </label>
-      <p class="muted">X本体の画面表示にも影響します。切り替えた場合はXのページを再読み込みしてください。Control Panel for Twitterの同種設定を使っている場合はOFFのままで構いません。</p>
-      <p class="feedback" id="xOptionsFeedback" role="status" aria-live="polite"></p>
-    </details>
+        <div class="threads-danger-row">
+          <button type="button" id="threadsDisconnectBtn" class="danger-outline" disabled>トークンを削除</button>
+        </div>
+        <div class="inline-confirm" id="threadsDisconnectConfirm" hidden>
+          <strong>保存したThreadsトークンを削除しますか？</strong>
+          <p>このPCのトークンだけを削除します。収集済みデータ・ZIPは残ります。Meta側の許可取り消しは行いません。</p>
+          <div class="confirm-actions"><button type="button" id="threadsDisconnectCancel" class="secondary">やめる</button><button type="button" id="threadsDisconnectApply" class="danger">トークンを削除</button></div>
+        </div>
+      </section>
+    </div>
 
-    <details class="more-section" id="supportedServices">
-      <summary>対応サービス</summary>
-      <div class="service-row"><strong>X</strong><span>対応中・Chromeのログインを利用</span></div>
-      <div class="service-row"><strong>Bluesky</strong><span>公開API対応／ログイン不要</span></div>
-      <div class="service-row"><strong>Threads</strong><span>将来対応予定</span></div>
-    </details>
+    <div class="tab-panel" id="panel-backup" role="tabpanel" aria-labelledby="tab-backup" data-tab-panel="backup" hidden>
+      <section class="backup" aria-labelledby="backupTitle">
+        <h2 id="backupTitle">バックアップと復元</h2>
+        <p class="section-lead">収集状態やZIP進捗を書き出したり、保存済みZIP／JSONから復元します。認証情報は含みません。</p>
+        <div class="backup-grid">
+          <div class="backup-panel export-panel">
+            <h3>JSONをエクスポート</h3>
+            <label class="form-label" for="exportScope">保存する対象</label>
+            <select id="exportScope" class="form-control">
+              <option value="all">すべて（従来どおり）</option>
+              <option value="x">Xのみ</option><option value="bluesky">Blueskyのみ</option>
+              <option value="threads">Threadsのみ</option><option value="choose">アカウントを選択</option>
+            </select>
+            <div id="exportAccountChooser" class="account-preview" hidden></div>
+            <button class="primary" id="exportBackupBtn" type="button">JSONをエクスポート</button>
+            <p class="feedback" id="exportFeedback" role="status" aria-live="polite"></p>
+          </div>
+          <div class="backup-panel import-panel">
+            <h3>ZIP／JSONから復元</h3>
+            <label class="form-label" for="importScope">復元する対象</label>
+            <select id="importScope" class="form-control">
+              <option value="all">すべて（従来どおり自動追加）</option>
+              <option value="x">Xのみ</option><option value="bluesky">Blueskyのみ</option>
+              <option value="threads">Threadsのみ</option><option value="choose">読み込み後にアカウントを選択</option>
+            </select>
+            <div class="drop-target" id="backupDropZone" tabindex="0" role="button" aria-label="ZIPまたはJSONを読み込む">
+              <strong>ZIP／JSONをここにドロップ</strong>
+              <span>またはクリックして選択</span>
+            </div>
+            <input type="file" accept=".zip,.json,application/zip,application/json" id="backupFileInput" hidden>
+          </div>
+        </div>
+        <p id="importFeedback" class="feedback" role="status" aria-live="polite"></p>
+        <div class="import-result" id="importResult" hidden>
+          <div class="result-head"><span class="result-check" aria-hidden="true">✓</span>
+            <div><strong id="importResultText">復元しました</strong><small id="importSourceText"></small></div>
+          </div>
+          <button class="subtle" id="replaceAccountsBtn" type="button" hidden>同じアカウントを上書き</button>
+          <details class="import-advanced" id="importAdvanced">
+            <summary>詳細な復元操作</summary>
+            <div id="importAccounts" class="account-preview"></div>
+            <button id="importSelectedBtn" type="button" class="primary" hidden>選択したアカウントを復元</button>
+            <p id="importWarning" class="import-warning" hidden></p>
+            <button id="replaceAllBtn" class="danger-outline" type="button" hidden>このJSONで全体を置き換える</button>
+          </details>
+          <div class="inline-confirm" id="importConfirmBox" hidden>
+            <strong id="importConfirmText">現在の状態を置き換えますか？</strong>
+            <div class="confirm-actions"><button type="button" id="cancelImportBtn" class="secondary">いいえ</button>
+            <button type="button" id="applyImportBtn" class="danger">はい、置き換える</button></div>
+          </div>
+        </div>
+      </section>
+    </div>
 
-    <section class="reset-section" aria-labelledby="resetTitle">
-      <h2 id="resetTitle">データの初期化</h2>
-      <div class="reset-row"><p>シンプルまるごとZIPの拡張データを削除します。</p>
-        <button class="danger-outline" id="resetAllBtn" type="button">すべて削除</button></div>
-      <div id="resetConfirmBox" class="inline-confirm reset-confirm" hidden>
-        <strong>本当に削除しますか？</strong>
-        <p>収集・ZIP進捗、設定、保存先の記憶を初期化します。PCに保存したZIP・JSONは残ります。</p>
-        <div class="confirm-actions"><button id="cancelResetBtn" type="button" class="secondary">いいえ</button>
-          <button id="applyResetBtn" type="button" class="danger">はい、削除する</button></div>
-      </div>
-      <p id="resetFeedback" class="feedback" role="status" aria-live="polite"></p>
-    </section>
+    <div class="tab-panel" id="panel-data" role="tabpanel" aria-labelledby="tab-data" data-tab-panel="data" hidden>
+      <section class="data-management" id="accountManagement" aria-labelledby="accountManagementTitle">
+        <h2 id="accountManagementTitle">SNS別・アカウント別の保存状態を管理</h2>
+        <p class="section-lead">必要なアカウントだけ選んで収集情報とZIP進捗を削除します。PCに保存したZIPやJSONは削除しません。</p>
+        <button id="refreshAccountListBtn" type="button" class="secondary">アカウント一覧を更新</button>
+        <div id="managedAccounts" class="account-preview managed-account-list"></div>
+        <button id="deleteSelectedAccountsBtn" class="danger-outline" type="button">選択した状態を削除</button>
+        <div id="deleteSelectedConfirm" class="inline-confirm" hidden>
+          <strong id="deleteSelectedConfirmText">選択したアカウントを削除しますか？</strong>
+          <div class="confirm-actions"><button id="cancelDeleteSelectedBtn" class="secondary" type="button">やめる</button><button id="applyDeleteSelectedBtn" class="danger" type="button">はい、削除</button></div>
+        </div>
+        <p id="manageFeedback" class="feedback" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="reset-section" aria-labelledby="resetTitle">
+        <h2 id="resetTitle">データの初期化</h2>
+        <div class="reset-row"><p>シンプルまるごとZIPの拡張データを削除します。</p>
+          <button class="danger-outline" id="resetAllBtn" type="button">すべて削除</button></div>
+        <div id="resetConfirmBox" class="inline-confirm reset-confirm" hidden>
+          <strong>本当に削除しますか？</strong>
+          <p>収集・ZIP進捗、Threads認証情報、設定、保存先の記憶を初期化します。PCに保存したZIP・JSONは残ります。</p>
+          <div class="confirm-actions"><button id="cancelResetBtn" type="button" class="secondary">いいえ</button>
+            <button id="applyResetBtn" type="button" class="danger">はい、削除する</button></div>
+        </div>
+        <p id="resetFeedback" class="feedback" role="status" aria-live="polite"></p>
+      </section>
+    </div>
   </main>
   <script src="../backup/schema.js"></script>
   <script src="../backup/zip-reader.js"></script>

@@ -36,7 +36,26 @@ assert.equal(full.accounts[0].current.archive.saveDirectoryName, null);
 assert.equal(full.accounts[0].current.preferredSaveDirectoryName, null);
 assert.equal(full.accounts[0].current.items.length, 12);
 assert.equal(backup.parseJson(fullText).accounts[0].current.items.length, 12);
-console.log('PASS allowlist: 12 media, saved preferences, no unknown storage/API/token/cookie/query secrets');
+const completeWithFailure = initial();
+completeWithFailure.archive = {
+  status:'archive_complete', selection:{images:true,videos:false}, splitMode:'auto', mediaKind:'images',
+  nextItemIndex:12, nextZipNumber:3, savedZipCount:2, processedItems:12, failedItems:1, totalSelected:12,
+  currentZipNumber:3, startedAt:Date.now()-1000, updatedAt:Date.now(), completedAt:Date.now(),
+  failures:[{key:ids[5]+'_1',error:'network'}]
+};
+const normalizedFailureComplete = backup.safeCollection(completeWithFailure);
+assert.equal(normalizedFailureComplete.archive.status,'archive_complete','processed-to-end archive with failures must restore as complete');
+assert.equal(normalizedFailureComplete.archive.failedItems,1);
+assert.equal(normalizedFailureComplete.savedKinds.images,true,'completed archive keeps failure count but must not permanently block later delta checks');
+const legacyFinal = initial();
+legacyFinal.archive = {...completeWithFailure.archive,status:'archive_paused',pauseReason:'imported_incomplete'};
+const normalizedLegacyFinal = backup.safeCollection(legacyFinal);
+assert.equal(normalizedLegacyFinal.archive.status,'archive_complete','legacy final ZIP with imported_incomplete must normalize to complete');
+assert.equal(normalizedLegacyFinal.savedKinds.images,true,'legacy final ZIP with a failed item must still allow later delta checks');
+const incompleteCheckpoint = initial();
+incompleteCheckpoint.archive = {...completeWithFailure.archive,nextItemIndex:10,processedItems:10,totalSelected:12,status:'archive_complete'};
+assert.equal(backup.safeCollection(incompleteCheckpoint).archive.status,'archive_paused','truly incomplete checkpoint must remain resumable');
+console.log('PASS allowlist: 12 media, saved preferences, no unknown storage/API/token/cookie/query secrets; final failed-item checkpoint restores complete');
 
 async function testZip() {
   let state = initial();
