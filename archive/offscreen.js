@@ -322,7 +322,6 @@ async function createDirectZipWriter(directoryKey, filename) {
 // 複数ZIPの途中のものを復元しても「全件保存済み」と誤認させない。
 async function checkpointFile(state, previous, archive, job, endIndex, zipNumber, failedItems, failures, totalSelected) {
   const isFinal = endIndex >= totalSelected;
-  const noFailures = !failedItems;
   const checkpointArchive = {
     ...archive,
     status: isFinal ? 'archive_complete' : 'archive_paused',
@@ -341,7 +340,24 @@ async function checkpointFile(state, previous, archive, job, endIndex, zipNumber
     completionAcknowledged: true
   };
   const checkpoint = { ...state, archive: checkpointArchive };
-  if (isFinal && noFailures) {
+
+  // A checkpoint must be self-contained. Merge the exact keys already finalized by older
+  // jobs with only the prefix actually processed by this job. In particular, do not put
+  // later split-ZIP items into savedItemKeys before their checkpoint is reached.
+  const savedKeys = new Set(Array.isArray(state.savedItemKeys) ? state.savedItemKeys : []);
+  const executionKeys = Array.isArray(archive.itemKeys) && archive.itemKeys.length
+    ? archive.itemKeys
+    : selectedItems(state, job.selection || {}).map(item => item.key);
+  const processedCount = Math.max(0, Math.min(Number(endIndex || 0), executionKeys.length));
+  for (const key of executionKeys.slice(0, processedCount)) {
+    if (typeof key === 'string' && key) savedKeys.add(key);
+  }
+  checkpoint.savedItemKeys = [...savedKeys];
+
+  if (isFinal) {
+    // Match Background semantics: archive_complete means every selected item was processed.
+    // Fetch failures remain visible in failedItems/failures, but do not make restore treat
+    // the whole archive as unfinished or block the next delta check.
     checkpoint.savedKinds = { ...(state.savedKinds || {}) };
     checkpoint.deltaSavedKinds = { ...(state.deltaSavedKinds || {}) };
     if (job.selection?.images) { checkpoint.savedKinds.images = true; if (state.deltaMode) checkpoint.deltaSavedKinds.images = true; }
@@ -375,6 +391,9 @@ async function runArchiveDirectory(job, state, previous, archive, items, limits,
     }
 
     const chunkStartIndex = index;
+    const committedFailedItems = failedItems;
+    const committedFailures = failures.slice();
+    const committedRunDownloaded = runDownloaded;
     let chunkCount = 0;
     let chunkBytes = 0;
     let consumedIndex = index;
@@ -452,18 +471,56 @@ async function runArchiveDirectory(job, state, previous, archive, items, limits,
 
       if (cancelRequested) {
         if (writer) await writer.abort();
-        await patchArchive(job.handle, {
-          status: 'archive_paused',
-          nextItemIndex: chunkStartIndex,
-          currentZipNumber: zipNumber,
-          currentFileCount: 0,
-          lastError: null
-        });
+        await rollbackUnpersistedArchiveProgress(job.handle, chunkStartIndex,
+          committedFailedItems, committedFailures, items.length, {
+            status: 'archive_paused',
+            currentZipNumber: zipNumber,
+            currentFileCount: 0,
+            batchSaved: committedRunDownloaded,
+            lastError: null
+          });
         return;
       }
 
       if (!writer || !chunkCount) {
         if (consumedIndex > chunkStartIndex) {
+          // If the remaining range was consumed entirely by fetch failures, there is no media
+          // file to force a final ZIP. Persist a metadata-only terminal checkpoint so the latest
+          // ZIP can restore the same completion/failure state as local storage.
+          if (consumedIndex >= items.length) {
+            try {
+              writer = await createDirectZipWriter(job.saveDirectoryKey, filename);
+              await writer.add(await checkpointFile(state, previous, archive, job, consumedIndex,
+                zipNumber, failedItems, failures, items.length));
+              await writer.finalize();
+              writer = null;
+
+              state = await patchArchive(job.handle, {
+                status: 'archiving',
+                nextItemIndex: consumedIndex,
+                nextZipNumber: zipNumber + 1,
+                savedZipCount: (archive.savedZipCount || 0) + 1,
+                processedItems: consumedIndex,
+                failedItems,
+                failures,
+                currentZipNumber: zipNumber + 1,
+                currentFileCount: 0,
+                batchSaved: runDownloaded,
+                progress: consumedIndex / items.length
+              });
+              archive = state.archive || archive;
+              zipNumber++;
+              continue;
+            } catch (error) {
+              if (writer) { await writer.abort(); writer = null; }
+              failedItems = committedFailedItems;
+              failures.splice(0, failures.length, ...committedFailures);
+              await rollbackUnpersistedArchiveProgress(job.handle, chunkStartIndex,
+                committedFailedItems, committedFailures, items.length);
+              throw error;
+            }
+          }
+
           await patchArchive(job.handle, {
             nextItemIndex: consumedIndex,
             processedItems: consumedIndex,
@@ -548,9 +605,23 @@ async function waitForDownload(downloadId) {
 }
 
 function selectedItems(state, selection) {
-  return (state.items || []).filter((item) =>
+  const selected = (state.items || []).filter((item) =>
     (item.type === 'image' && selection.images) || (item.type === 'video' && selection.videos)
   );
+  const frozen = state.archive?.itemKeys;
+  if (!Array.isArray(frozen) || !frozen.length) return selected;
+  const byKey = new Map(selected.map(item => [item.key, item]));
+  const ordered = [];
+  for (const key of frozen) {
+    const item = byKey.get(key);
+    if (!item) continue;
+    ordered.push(item);
+    byKey.delete(key);
+  }
+  // Background should append new keys before starting, but keep this fallback so an
+  // older/imported state cannot silently lose items that are absent from itemKeys.
+  for (const item of selected) if (byKey.has(item.key)) ordered.push(item);
+  return ordered;
 }
 
 async function patchArchive(handle, patch) {
@@ -562,6 +633,23 @@ async function patchArchive(handle, patch) {
   });
   if (!result?.ok) throw new Error(result?.error || '進捗保存に失敗しました');
   return result.state;
+}
+
+// A media fetch may advance the live progress display before the containing ZIP checkpoint is
+// durable. If that ZIP cannot be saved, return to the last durable checkpoint so retrying cannot
+// silently skip the failed-only tail or double-count its failure history.
+async function rollbackUnpersistedArchiveProgress(handle, startIndex, committedFailedItems, committedFailures, totalSelected, extraPatch = {}) {
+  return patchArchive(handle, {
+    status: 'archiving',
+    nextItemIndex: startIndex,
+    processedItems: startIndex,
+    failedItems: committedFailedItems,
+    failures: committedFailures,
+    currentFileCount: 0,
+    progress: totalSelected ? startIndex / totalSelected : 0,
+    lastError: null,
+    ...extraPatch
+  });
 }
 
 async function saveChunk(handle, startedAt, mediaKind, zipNumber, files, job) {
@@ -594,7 +682,9 @@ async function saveChunk(handle, startedAt, mediaKind, zipNumber, files, job) {
 }
 
 async function runArchive(job) {
-  cancelRequested = false;
+  // activeJob is reserved synchronously by the message handler before this async
+  // function starts. Do not clear cancelRequested here: a stop can arrive in the
+  // short window between the start acknowledgement and this task running.
   activeJob = job;
 
   const stateResult = await runtimeMessage({ type: 'SMZ_ARCHIVE_GET_STATE', platform: job.platform || 'x', handle: job.handle });
@@ -640,6 +730,9 @@ async function runArchive(job) {
     const chunk = [];
     let chunkBytes = 0;
     const chunkStartIndex = index;
+    const committedFailedItems = failedItems;
+    const committedFailures = failures.slice();
+    const committedRunDownloaded = runDownloaded;
     let consumedIndex = index;
 
     while (index < items.length && runDownloaded < runLimit) {
@@ -698,19 +791,55 @@ async function runArchive(job) {
     }
 
     if (cancelRequested) {
-      await patchArchive(job.handle, {
-        status: 'archive_paused',
-        nextItemIndex: chunkStartIndex,
-        currentZipNumber: zipNumber,
-        currentFileCount: 0,
-        lastError: null
-      });
+      await rollbackUnpersistedArchiveProgress(job.handle, chunkStartIndex,
+        committedFailedItems, committedFailures, items.length, {
+          status: 'archive_paused',
+          currentZipNumber: zipNumber,
+          currentFileCount: 0,
+          batchSaved: committedRunDownloaded,
+          lastError: null
+        });
       return;
     }
 
     if (!chunk.length) {
-      // 取得失敗だけで進んだ区間。次回同じ失敗で詰まらないよう進捗は保存する。
+      // The remaining range can consist only of failed fetches. A local-only progress update is
+      // not enough: without another ZIP, restoring the latest ZIP would lose the final failures
+      // and appear unfinished. Write a checkpoint-only terminal ZIP after the last media ZIP.
       if (consumedIndex > chunkStartIndex) {
+        if (consumedIndex >= items.length) {
+          const checkpointOnly = [await checkpointFile(state, previous, archive, job, consumedIndex,
+            zipNumber, failedItems, failures, items.length)];
+          try {
+            await saveChunk(job.handle, archive.startedAt || state.archive?.startedAt || Date.now(),
+              job.mediaKind || archive.mediaKind || mediaKindFromSelection(job.selection), zipNumber,
+              checkpointOnly, job);
+          } catch (error) {
+            failedItems = committedFailedItems;
+            failures.splice(0, failures.length, ...committedFailures);
+            await rollbackUnpersistedArchiveProgress(job.handle, chunkStartIndex,
+              committedFailedItems, committedFailures, items.length);
+            throw error;
+          }
+
+          state = await patchArchive(job.handle, {
+            status: 'archiving',
+            nextItemIndex: consumedIndex,
+            nextZipNumber: zipNumber + 1,
+            savedZipCount: (archive.savedZipCount || 0) + 1,
+            processedItems: consumedIndex,
+            failedItems,
+            failures,
+            currentZipNumber: zipNumber + 1,
+            currentFileCount: 0,
+            batchSaved: runDownloaded,
+            progress: consumedIndex / items.length
+          });
+          archive = state.archive || archive;
+          zipNumber++;
+          continue;
+        }
+
         await patchArchive(job.handle, {
           nextItemIndex: consumedIndex,
           processedItems: consumedIndex,
@@ -782,7 +911,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== 'offscreen') return;
 
   if (message.type === 'SMZ_OFFSCREEN_GET_STATUS') {
-    sendResponse({ active: !!activeJob, handle: activeJob?.handle || null, platform: activeJob?.platform || null });
+    sendResponse({ active: !!activeJob, handle: activeJob?.handle || null, platform: activeJob?.platform || null, jobId: activeJob?.jobId || null });
     return true;
   }
 
@@ -809,13 +938,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'SMZ_OFFSCREEN_STOP_ARCHIVE') {
+    if (!activeJob) {
+      sendResponse({ ok:false, error:'ZIP保存は実行されていません' });
+      return true;
+    }
+    if ((message.jobId && message.jobId !== activeJob.jobId) ||
+        (message.handle && message.handle !== activeJob.handle) ||
+        (message.platform && message.platform !== activeJob.platform)) {
+      sendResponse({ ok:false, error:'別のZIP保存ジョブは停止できません' });
+      return true;
+    }
     cancelRequested = true;
-    return;
+    sendResponse({ ok:true, jobId:activeJob.jobId });
+    return true;
   }
 
   if (message.type === 'SMZ_OFFSCREEN_START_ARCHIVE') {
-    if (activeJob) return;
+    if (activeJob) {
+      sendResponse({ ok:false, error:'別のZIP保存が進行中です', jobId:activeJob.jobId || null, handle:activeJob.handle || null, platform:activeJob.platform || null });
+      return true;
+    }
     const job = {
+      jobId: message.jobId || `${Date.now()}_${Math.random().toString(36).slice(2,10)}`,
       platform: message.platform || 'x',
       handle: message.handle,
       selection: message.selection,
@@ -826,7 +970,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       saveDirectoryKey: message.saveDirectoryKey || null,
       saveDirectoryName: message.saveDirectoryName || null
     };
-    runArchive(job)
+    // Reserve synchronously so two starts cannot both observe an idle offscreen worker.
+    cancelRequested = false;
+    activeJob = job;
+    sendResponse({ ok:true, jobId:job.jobId });
+    Promise.resolve().then(() => runArchive(job))
       .catch(async (error) => {
         const messageText = String(error?.message || error || '');
         if (messageText === 'cancelled') return;
@@ -851,8 +999,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch {}
       })
       .finally(() => {
-        activeJob = null;
+        if (activeJob === job) activeJob = null;
         cancelRequested = false;
       });
+    return true;
   }
 });

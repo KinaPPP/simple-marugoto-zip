@@ -119,6 +119,9 @@
     out.selection = { images: v.selection?.images === true, videos: v.selection?.videos === true };
     out.failures = (Array.isArray(v.failures) ? v.failures : []).slice(-100)
       .filter(plain).map((x) => ({ key: str(x.key, 80) || '', error: '取得に失敗' }));
+    if (Array.isArray(v.itemKeys)) {
+      out.itemKeys = v.itemKeys.slice(0, MAX_ITEMS).map((key) => str(key, 100)).filter(Boolean);
+    }
     out.completionAcknowledged = v.completionAcknowledged !== false;
     // 保存先の名前もプライバシー上持ち出さない。別PCでは必ず再選択する。
     out.saveDirectoryKey = null;
@@ -160,9 +163,34 @@
     for (const f of ['deltaSavedKinds','savedKinds']) {
       out[f] = { images: v[f]?.images === true, videos: v[f]?.videos === true };
     }
+    if (Array.isArray(v.savedItemKeys)) {
+      const validKeys = new Set(items.map(item => item.key));
+      const seenSaved = new Set();
+      out.savedItemKeys = [];
+      for (const key of v.savedItemKeys.slice(0, MAX_ITEMS)) {
+        const safeKey = str(key, 100);
+        if (!safeKey || !validKeys.has(safeKey) || seenSaved.has(safeKey)) continue;
+        seenSaved.add(safeKey);
+        out.savedItemKeys.push(safeKey);
+      }
+    }
     const baselineCounts = safeCounts(v.deltaBaselineCounts);
     if (baselineCounts) out.deltaBaselineCounts = baselineCounts;
     out.archive = safeArchive(v.archive);
+    if (out.archive && Array.isArray(out.archive.itemKeys)) {
+      const selectedSet = new Set(items
+        .filter((item) => (item.type === 'image' && out.archive.selection.images) || (item.type === 'video' && out.archive.selection.videos))
+        .map((item) => item.key));
+      const frozen = [];
+      const seen = new Set();
+      // Preserve only the order that was actually recorded. Missing itemKeys means the
+      // legacy checkpoint order is unknown; never synthesize it from the current items.
+      for (const key of out.archive.itemKeys) {
+        if (!selectedSet.has(key) || seen.has(key)) continue;
+        seen.add(key); frozen.push(key);
+      }
+      out.archive.itemKeys = frozen;
+    }
     if (out.archive?.status === 'archive_complete' &&
         Number(out.archive.nextItemIndex || 0) < Number(out.archive.totalSelected || 0)) {
       out.archive.status = 'archive_paused';
@@ -189,7 +217,8 @@
     }
     out.collectionMode = ['bluesky','threads'].includes(platform) ? 'api' : out.collectionMode === 'manual' ? 'manual' : 'auto';
     out.status = out.status === 'complete' ? 'complete' : 'paused';
-    out.pauseReason = out.status === 'paused' ? 'imported' : null;
+    const boundaryMissing = out.deltaMode === true && out.deltaVerified !== true && v.pauseReason === 'delta_boundary_missing';
+    out.pauseReason = out.status === 'paused' ? (boundaryMissing ? 'delta_boundary_missing' : 'imported') : null;
     out.collectionPhase = null;
     out.collectionTabId = null;
     out.confirmationTabId = null;
@@ -198,7 +227,9 @@
     out.largeWarningConfirmed = v.largeWarningConfirmed === true;
     out.preferredSaveDirectoryKey = null;
     out.preferredSaveDirectoryName = null;
-    out.lastError = null;
+    out.lastError = boundaryMissing
+      ? '前回の保存済み投稿との境界を確認できませんでした。前回の状態へ戻してください'
+      : null;
     // 引き継いだメディアがURL許可リスト外なら、再取得が必要なことを示す。
     out.mediaUrlsMissing = items.some((item) => !item.url);
     if (out.archive) {

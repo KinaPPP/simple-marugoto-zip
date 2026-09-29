@@ -7,6 +7,7 @@ const RESUME_ALARM_PREFIX = 'smz_resume_';
 const collectionQueues = new Map();
 const blueskyJobs = new Map();
 const threadsJobs = new Map();
+let archiveStartQueue = Promise.resolve();
 const THREADS_AUTH_KEY = 'smz_threads_auth_v1'; // excluded from ALL backup formats
 const THREADS_ALARM = 'smz_threads_token_refresh';
 const API_COLLECTION_WATCHDOG_ALARM = 'smz_api_collection_watchdog';
@@ -305,6 +306,102 @@ function archiveMediaKind(selection) {
   return 'media';
 }
 
+function selectedArchiveItemKeys(state, selection) {
+  return (Array.isArray(state?.items) ? state.items : [])
+    .filter(item => (item.type === 'image' && selection?.images) || (item.type === 'video' && selection?.videos))
+    .map(item => item.key)
+    .filter(key => typeof key === 'string' && key);
+}
+
+function markAddedItemsUnsaved(state, addedItems) {
+  if (!state || !Array.isArray(addedItems) || !addedItems.length) return;
+  const hasImage = addedItems.some(item => item?.type === 'image');
+  const hasVideo = addedItems.some(item => item?.type === 'video');
+  if (!hasImage && !hasVideo) return;
+  state.savedKinds = { ...(state.savedKinds || {}) };
+  if (hasImage) state.savedKinds.images = false;
+  if (hasVideo) state.savedKinds.videos = false;
+  if (state.deltaMode) {
+    state.deltaSavedKinds = { ...(state.deltaSavedKinds || {}) };
+    if (hasImage) state.deltaSavedKinds.images = false;
+    if (hasVideo) state.deltaSavedKinds.videos = false;
+  }
+}
+
+function archiveCoversCurrentCollection(state) {
+  if (!state || !archiveReachedEnd(state)) return false;
+  const archive = state.archive;
+  const collectionCompletedAt = Number(state.completedAt || 0);
+  const archivedCollectionCompletedAt = Number(archive?.collectionCompletedAt || 0);
+  // A collection completed again after the archive snapshot: media may have been added.
+  if (collectionCompletedAt && archivedCollectionCompletedAt && collectionCompletedAt !== archivedCollectionCompletedAt) return false;
+
+  const selectedKeys = selectedArchiveItemKeys(state, archive?.selection || {});
+  if (Array.isArray(archive?.itemKeys)) {
+    const frozen = new Set(archive.itemKeys.filter(key => typeof key === 'string' && key));
+    if (!selectedKeys.every(key => frozen.has(key))) return false;
+  } else if (Number(archive?.totalSelected || 0) !== selectedKeys.length) {
+    // Legacy checkpoints without itemKeys are trustworthy only when the selected count
+    // still exactly matches the completed archive. Never guess an old array order.
+    return false;
+  }
+  return true;
+}
+
+function migrateTrustedLegacySavedItemKeys(state) {
+  if (!state || Array.isArray(state.savedItemKeys)) return false;
+  const archive = state.archive;
+  if (!archiveReachedEnd(state) || !Array.isArray(archive?.itemKeys) || !archive.itemKeys.length) return false;
+
+  // Older states may know exactly which keys a completed ZIP job processed even though
+  // savedItemKeys did not exist yet. Preserve only those explicit keys; never infer keys
+  // from savedKinds or from the current items order. This keeps legacy kind-by-kind saves
+  // usable without reviving the old index/order ambiguity.
+  const validCurrentKeys = new Set((Array.isArray(state.items) ? state.items : [])
+    .map(item => item?.key)
+    .filter(key => typeof key === 'string' && key));
+  const processed = Math.max(0, Math.min(
+    Number(archive.nextItemIndex ?? archive.processedItems ?? 0),
+    Number(archive.totalSelected || 0),
+    archive.itemKeys.length
+  ));
+  const migrated = [];
+  const seen = new Set();
+  for (const key of archive.itemKeys.slice(0, processed)) {
+    if (typeof key !== 'string' || !key || !validCurrentKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    migrated.push(key);
+  }
+  if (!migrated.length) return false;
+  state.savedItemKeys = migrated;
+  return true;
+}
+
+function allCurrentMediaArchived(state) {
+  const items = Array.isArray(state?.items) ? state.items : [];
+  if (!items.length) return false;
+  // v1.3.1+ records exact keys processed by finalized ZIP jobs, including failed fetches.
+  // Once this field exists, it is authoritative across image/video jobs.
+  if (Array.isArray(state.savedItemKeys)) {
+    const saved = new Set(state.savedItemKeys.filter(key => typeof key === 'string' && key));
+    return items.every(item => item?.key && saved.has(item.key));
+  }
+
+  // Legacy compatibility: only accept the old savedKinds booleans if the latest archive
+  // still describes the same completed collection. This rejects the dangerous case where
+  // collection resumed and added media after the old ZIP had completed.
+  if (!archiveCoversCurrentCollection(state)) return false;
+  const saved = effectiveSavedKinds(state, state.deltaMode ? 'deltaSavedKinds' : 'savedKinds');
+  return (!state.counts?.images || saved.images === true) &&
+    (!state.counts?.videos || saved.videos === true);
+}
+
+function withArchiveStartLock(fn) {
+  const next = archiveStartQueue.catch(() => {}).then(fn);
+  archiveStartQueue = next.catch(() => {});
+  return next;
+}
+
 function collectionKey(platform, handle) {
   return `${COLLECTION_PREFIX}${platform}_${normalizeHandle(handle)}`;
 }
@@ -352,19 +449,11 @@ function deltaKindsSaved(state) {
 
 function canStartNewOnlyCheck(state) {
   if (!state || state.status !== 'complete' || !validPostId(state.newestPostId, state.platform)) return false;
-  // 未保存の全件収集を差分で上書きしない。旧版の完成済みZIPは選択種別の履歴が
-  // 残っていないことがあるため、archive_completeのみを必須とする。
   if (state.archive?.status !== 'archive_complete') return false;
-  if (state.deltaMode) return deltaKindsSaved(state);
-  // v0.0.21以降は種別ごとの保存履歴を使い、画像だけZIPにしたのに
-  // 動画までバックアップ済みとみなして差分チェックへ進まない。
-  if ((state.savedKinds && typeof state.savedKinds === 'object') || archiveReachedEnd(state)) {
-    const saved = effectiveSavedKinds(state, 'savedKinds');
-    return (!state.counts?.images || saved.images === true) &&
-      (!state.counts?.videos || saved.videos === true);
-  }
-  // 旧版には種別の保存履歴が無いため、当時の完了状態との互換性を維持する。
-  return true;
+  if (state.deltaMode && state.deltaVerified !== true) return false;
+  // A new-only baseline may only advance after every media item currently known to this
+  // snapshot has gone through a finalized ZIP job. This is key-based, not index/count-only.
+  return allCurrentMediaArchived(state);
 }
 
 async function getCollection(platform, handle) {
@@ -719,13 +808,16 @@ async function runBlueskyCollection(handle, job) {
       const state = await withCollectionLock('bluesky', handle, async (current) => {
         if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting' || job.stopped) return null;
         const existing = new Set(current.items.map(v => v.key));
+        const addedItems = [];
         for (const item of collected) {
           if (existing.has(item.key)) continue;
           existing.add(item.key);
           current.items.push(item);
+          addedItems.push(item);
           if (item.type === 'image') current.counts.images++;
           else current.counts.videos++;
         }
+        markAddedItemsUnsaved(current, addedItems);
         current.counts.total = current.counts.images + current.counts.videos;
         current.items.sort((a,b) => a.postId === b.postId ? a.mediaIndex-b.mediaIndex : a.postId>b.postId ? -1 : 1);
         current.newestPostId = current.items[0]?.postId || null;
@@ -815,11 +907,12 @@ async function refreshThreadsAuth(force = false) {
 }
 void getThreadsAuth().then(auth => { if (auth?.autoRenew !== false && auth?.token) return scheduleThreadsRenewal(); }).catch(() => {});
 
-function threadNewCollection(profile) {
+function threadNewCollection(profile, authUserId = null) {
   const state = makeNewCollection(profile.handle);
   state.platform = 'threads';
   state.collectionMode = 'api';
   state.ownProfile = profile.own === true;
+  state.authUserId = authUserId ? String(authUserId) : null;
   state.resumeCursor = null;
   state.pagesFetched = 0;
   state.scannedPosts = 0;
@@ -830,12 +923,21 @@ async function runThreadsCollection(handle, job) {
   const key = collectionKey('threads', handle);
   let cursor = job.cursor || null;
   const fetcher = (url, options) => fetch(url, { ...options, signal: job.abort.signal });
+  let previousPostIds = null;
+  if (job.baseline) {
+    const previousKey = previousCollectionKey('threads', handle);
+    const previous = (await chrome.storage.local.get(previousKey))[previousKey] || null;
+    if (previous?.items?.length) previousPostIds = new Set(previous.items.map(item => String(item.postId)));
+  }
   try {
     for (let n = 0; n < 10000; n++) {
       if (job.stopped) return;
       // Do not retain tokens in the collection state, backup or offscreen ZIP job.
       const auth = await getThreadsAuth();
       if (!auth?.token) throw new Error('Threadsの認証情報がなくなりました。設定画面から再接続してください');
+      if (job.authUserId && String(auth.userId || '') !== String(job.authUserId)) {
+        throw new Error('Threadsの接続アカウントが変更されたため収集を停止しました');
+      }
       const page = await SMZThreads.page({ handle, own: job.own }, cursor, auth.token, fetcher);
       if (job.stopped) return;
       let boundaryReached = false;
@@ -844,8 +946,10 @@ async function runThreadsCollection(handle, job) {
       for (const post of page.data) {
         if (!SMZThreads.validId(post?.id)) continue;
         scanned++;
-        // Threads media IDs aren't guaranteed to be Snowflakes. Match the prior boundary exactly.
-        if (job.baseline && String(post.id) === job.baseline) { boundaryReached = true; break; }
+        // Threads media IDs aren't guaranteed to be Snowflakes. The latest prior post can be
+        // deleted, so accept any post already present in the previous snapshot as the boundary.
+        const postId = String(post.id);
+        if (job.baseline && (postId === job.baseline || previousPostIds?.has(postId))) { boundaryReached = true; break; }
         const extracted = await SMZThreads.extract(post, auth.token, fetcher);
         if (extracted) collected.push(...extracted.items);
       }
@@ -854,12 +958,14 @@ async function runThreadsCollection(handle, job) {
       const state = await withCollectionLock('threads', handle, async current => {
         if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting' || job.stopped) return null;
         const keys = new Set(current.items.map(item => item.key));
+        const addedItems = [];
         for (const item of collected) {
           if (keys.has(item.key)) continue;
-          keys.add(item.key); current.items.push(item);
+          keys.add(item.key); current.items.push(item); addedItems.push(item);
           if (item.type === 'image') current.counts.images++;
           else current.counts.videos++;
         }
+        markAddedItemsUnsaved(current, addedItems);
         current.counts.total = current.counts.images + current.counts.videos;
         current.items.sort((a,b) => (Date.parse(b.postedAt || '') || 0) - (Date.parse(a.postedAt || '') || 0) ||
           (a.postId === b.postId ? a.mediaIndex-b.mediaIndex : compareNumericPostIds(b.postId,a.postId)));
@@ -870,6 +976,15 @@ async function runThreadsCollection(handle, job) {
         current.resumeCursor = nextCursor;
         if (current.deltaMode) current.deltaBoundaryReached = boundaryReached;
         current.updatedAt = Date.now();
+        if (current.deltaMode && endOfFeed && !boundaryReached) {
+          current.status = 'paused';
+          current.pauseReason = 'delta_boundary_missing';
+          current.deltaVerified = false;
+          current.lastError = '前回の保存済み投稿との境界を確認できませんでした。前回の状態へ戻すか、進捗をリセットして再収集してください';
+          current.resumeCursor = null;
+          await setCollection(current);
+          return current;
+        }
         if (boundaryReached || endOfFeed) return finishCollectionState(current, { endOfFeed, manual: false });
         await setCollection(current);
         return current;
@@ -935,8 +1050,28 @@ async function recoverApiCollections() {
 
     if (state.platform === 'threads') {
       if (threadsJobs.has(storedKey)) continue;
+      const auth = await getThreadsAuth();
+      const boundAuthUserId = state.authUserId || auth?.userId || null;
+      if (!auth?.token || (state.authUserId && String(auth?.userId || '') !== String(state.authUserId))) {
+        await withCollectionLock('threads', handle, async current => {
+          if (!current || current.collectionId !== state.collectionId || current.status !== 'collecting') return current;
+          current.status = 'paused';
+          current.pauseReason = 'auth';
+          current.lastError = !auth?.token ? 'Threadsの認証情報がありません。設定画面から再接続してください' :
+            'Threadsの接続アカウントが変更されているため自動再開しませんでした';
+          current.updatedAt = Date.now();
+          await setCollection(current);
+          return current;
+        });
+        continue;
+      }
+      if (!state.authUserId && boundAuthUserId) {
+        state.authUserId = String(boundAuthUserId);
+        await chrome.storage.local.set({ [storedKey]: state });
+      }
       const job = {
         own: state.ownProfile === true,
+        authUserId: boundAuthUserId ? String(boundAuthUserId) : null,
         collectionId: state.collectionId,
         baseline: state.deltaMode ? state.deltaBaselinePostId : null,
         cursor: state.resumeCursor || null,
@@ -1060,6 +1195,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const token = String(message.token || '').trim();
         if (!/^[-A-Za-z0-9_.|]+$/.test(token) || token.length > 4096) throw new Error('トークンの形式を確認してください');
         const profile = await SMZThreads.me(token);
+        await apiRecoveryPromise.catch(() => {});
+        const previousAuth = await getThreadsAuth();
+        const all = await chrome.storage.local.get(null);
+        const threadsCollecting = Object.entries(all).some(([key, value]) =>
+          key.startsWith(COLLECTION_PREFIX) && value?.platform === 'threads' && value?.status === 'collecting');
+        if (threadsCollecting && (!previousAuth?.userId || String(previousAuth.userId) !== String(profile.id))) {
+          throw new Error('Threads収集中は別アカウントのトークンへ変更できません。収集を停止してから変更してください');
+        }
         const auth = { token, username: profile.handle, userId: profile.id, autoRenew: message.autoRenew !== false,
           issuedAt: Date.now(), expiresAt: Date.now() + 60*24*60*60*1000,
           expiryEstimated: true, lastRefreshAt: null, lastRefreshAttempt: null, lastError: null };
@@ -1124,7 +1267,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.newOnly) {
           if (!canStartNewOnlyCheck(state)) throw new Error('差分確認前に前回のZIP保存を完了してください');
           const previous = state;
-          state = threadNewCollection(profile);
+          state = threadNewCollection(profile, auth.userId);
           state.deltaMode = true;
           state.deltaBaselinePostId = previous.newestPostId;
           state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
@@ -1137,15 +1280,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
           await chrome.storage.local.set({ [previousCollectionKey('threads',profile.handle)]: previous });
         } else if (message.restart || !state) {
-          state = threadNewCollection(profile);
+          state = threadNewCollection(profile, auth.userId);
         } else if (state.status === 'complete') {
           throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
         } else {
+          if (state.authUserId && String(state.authUserId) !== String(auth.userId || '')) {
+            throw new Error('この収集状態は別のThreads接続アカウントで開始されています。元のアカウントへ戻すか進捗をリセットしてください');
+          }
           state.status = 'collecting'; state.pauseReason = null; state.resumeAt = null; state.lastError = null;
           state.ownProfile = profile.own; state.updatedAt = Date.now();
         }
+        state.authUserId = auth.userId ? String(auth.userId) : null;
         state.collectionMode = 'api';
-        const job = { own: profile.own, collectionId: state.collectionId,
+        const job = { own: profile.own, authUserId: state.authUserId, collectionId: state.collectionId,
           baseline: state.deltaMode ? state.deltaBaselinePostId : null,
           cursor: state.resumeCursor || null, stopped:false, abort:new AbortController() };
         threadsJobs.set(key, job);
@@ -1172,8 +1319,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const key = previousCollectionKey('threads',handle);
         const previous = (await chrome.storage.local.get(key))[key];
         const state = await getCollection('threads',handle);
+        const boundaryMissing = state?.pauseReason === 'delta_boundary_missing' && state?.deltaVerified !== true;
         if (!previous || !state?.deltaMode || !['paused','complete'].includes(state.status) ||
-            state.archive?.status === 'archiving' || Number(state.archive?.savedZipCount || 0) > 0) {
+            state.archive?.status === 'archiving' || (!boundaryMissing && Number(state.archive?.savedZipCount || 0) > 0)) {
           throw new Error('前回の状態へ戻せません');
         }
         await chrome.storage.local.set({ [collectionKey('threads',handle)]:previous });
@@ -1413,6 +1561,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const olderIds = new Set(state.deltaOlderPostIds || []);
           const priorOlderCount = olderIds.size;
           let addedCount = 0;
+          const addedItems = [];
           for (const item of items) {
             if (state.deltaMode) {
               if (!validPostId(item?.postId)) continue;
@@ -1429,10 +1578,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (!item?.key || existing.has(item.key)) continue;
             state.items.push(item);
             existing.add(item.key);
+            addedItems.push(item);
             addedCount++;
             if (item.type === 'image') state.counts.images++;
             else if (item.type === 'video') state.counts.videos++;
           }
+          markAddedItemsUnsaved(state, addedItems);
           state.counts.total = state.counts.images + state.counts.videos;
           if (state.deltaMode && relevantBoundaryBatch) {
             state.deltaOlderPostIds = [...olderIds].slice(0, 6);
@@ -1664,124 +1815,162 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'SMZ_START_ARCHIVE': {
-        const handle = normalizeHandle(message.handle);
-        const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
-        const state = await getCollection(platform, handle);
-        const collectionCanArchive = state && ['paused', 'complete'].includes(state.status);
-        if (!state || !collectionCanArchive) {
-          throw new Error('メディアを収集中はZIP保存できません。収集を停止するか完了まで待ってください');
-        }
-        if (!(state.counts?.total > 0)) throw new Error('保存できるメディアがまだありません');
-        const selection = {
-          images: message.selection?.images !== false,
-          videos: message.selection?.videos !== false
-        };
-        if (!selection.images && !selection.videos) throw new Error('画像または動画を選択してください');
-        // 保存対象0件はジョブ作成・進捗更新・PDS権限要求前に拒否する。
-        if (!(Array.isArray(state.items)
-          ? state.items.some(item => (item.type === 'image' && selection.images) || (item.type === 'video' && selection.videos))
-          : ((selection.images ? Number(state.counts?.images || 0) : 0) +
-             (selection.videos ? Number(state.counts?.videos || 0) : 0)) > 0)) {
-          throw new Error('選択されたメディアがありません。画像・動画のチェックを変更してください');
-        }
-        // 次のZIP処理を開始したら、以前の完了通知は自動的に解除する。
-        await acknowledgeArchiveCompletions();
-        if (!state.collectionId) {
-          state.collectionId = makeCollectionId();
-          state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 2);
-        }
-        await ensureOffscreenDocument();
-        let splitMode = ['auto', '500mb', '1gb', '500files'].includes(message.splitMode) ? message.splitMode : 'auto';
-        const runLimit = Number(message.runLimit) === 5 ? 5 : null;
-        const mediaKind = archiveMediaKind(selection);
+        const startedState = await withArchiveStartLock(async () => {
+          const handle = normalizeHandle(message.handle);
+          const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
+          const state = await getCollection(platform, handle);
+          const collectionCanArchive = state && ['paused', 'complete'].includes(state.status);
+          if (!state || !collectionCanArchive) {
+            throw new Error('メディアを収集中はZIP保存できません。収集を停止するか完了まで待ってください');
+          }
+          if (state.deltaMode && state.deltaVerified !== true && state.pauseReason === 'delta_boundary_missing') {
+            throw new Error('前回の保存済み投稿との境界を確認できないため、この候補はZIP保存できません。前回の状態へ戻してください');
+          }
+          if (!(state.counts?.total > 0)) throw new Error('保存できるメディアがまだありません');
+          const selection = {
+            images: message.selection?.images !== false,
+            videos: message.selection?.videos !== false
+          };
+          if (!selection.images && !selection.videos) throw new Error('画像または動画を選択してください');
+          const selectedKeys = selectedArchiveItemKeys(state, selection);
+          const selectedCount = Array.isArray(state.items) ? selectedKeys.length :
+            ((selection.images ? Number(state.counts?.images || 0) : 0) + (selection.videos ? Number(state.counts?.videos || 0) : 0));
+          if (!selectedCount) throw new Error('選択されたメディアがありません。画像・動画のチェックを変更してください');
 
-        // v0.0.23以前に10ファイル分割で停止した作業だけは、更新後に表示される
-        // 「自動」を押してもそのまま続きを保存できるよう、既存ジョブを優先する。
-        // 保存完了済みの古いジョブに新しく10ファイル分割を適用することはない。
-        if (splitMode === 'auto' && state.archive?.splitMode === '10files' &&
-            state.archive.status === 'archive_paused' &&
+          await ensureOffscreenDocument();
+          const offscreenStatus = await chrome.runtime.sendMessage({ target:'offscreen', type:'SMZ_OFFSCREEN_GET_STATUS' });
+          if (offscreenStatus?.active) {
+            throw new Error(`別のZIP保存が進行中です${offscreenStatus.handle ? `（@${offscreenStatus.handle}）` : ''}`);
+          }
+
+          // 次のZIP処理を開始したら、以前の完了通知は自動的に解除する。
+          await acknowledgeArchiveCompletions();
+          if (!state.collectionId) {
+            state.collectionId = makeCollectionId();
+            state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 2);
+          }
+          let splitMode = ['auto', '500mb', '1gb', '500files'].includes(message.splitMode) ? message.splitMode : 'auto';
+          const runLimit = Number(message.runLimit) === 5 ? 5 : null;
+          const mediaKind = archiveMediaKind(selection);
+
+          // v0.0.23以前に10ファイル分割で停止した作業だけは、更新後に表示される
+          // 「自動」を押してもそのまま続きを保存できるよう、既存ジョブを優先する。
+          if (splitMode === 'auto' && state.archive?.splitMode === '10files' &&
+              state.archive.status === 'archive_paused' &&
+              state.archive.collectionId === state.collectionId &&
+              state.archive.selection?.images === selection.images &&
+              state.archive.selection?.videos === selection.videos &&
+              (state.archive.mediaKind || archiveMediaKind(state.archive.selection)) === mediaKind) {
+            splitMode = '10files';
+          }
+
+          // v1.3.0以前はnextItemIndexだけで再開していたため、収集再開後の並べ替えで
+          // 新しい先頭項目を飛ばす可能性があった。itemKeysが無い進行済み旧ジョブは
+          // 安全側で新規ジョブとして再保存し、以後はジョブ内の順序を固定する。
+          const hasFrozenOrder = Array.isArray(state.archive?.itemKeys) || Number(state.archive?.nextItemIndex || 0) === 0 || !Array.isArray(state.items);
+          const sameJob = state.archive && hasFrozenOrder &&
             state.archive.collectionId === state.collectionId &&
             state.archive.selection?.images === selection.images &&
             state.archive.selection?.videos === selection.videos &&
-            (state.archive.mediaKind || archiveMediaKind(state.archive.selection)) === mediaKind) {
-          splitMode = '10files';
-        }
+            state.archive.splitMode === splitMode &&
+            (state.archive.mediaKind || archiveMediaKind(state.archive.selection)) === mediaKind;
 
-        const sameJob = state.archive &&
-          state.archive.collectionId === state.collectionId &&
-          state.archive.selection?.images === selection.images &&
-          state.archive.selection?.videos === selection.videos &&
-          state.archive.splitMode === splitMode &&
-          (state.archive.mediaKind || archiveMediaKind(state.archive.selection)) === mediaKind;
+          // First v1.3.1+ archive after an older kind-by-kind save: carry forward only
+          // explicit keys from a completed legacy archive before that archive object is replaced.
+          // Unknown legacy order (no itemKeys) deliberately remains unknown and will be re-saved.
+          migrateTrustedLegacySavedItemKeys(state);
 
-        if (!sameJob) {
-          state.archive = {
-            status: 'archiving',
+          const priorArchive = state.archive ? JSON.parse(JSON.stringify(state.archive)) : null;
+          if (!sameJob) {
+            state.archive = {
+              status: 'archiving',
+              selection,
+              splitMode,
+              mediaKind,
+              runLimit,
+              saveMode: message.saveMode === 'directory' ? 'directory' : 'downloads',
+              saveDirectoryKey: message.saveDirectoryKey || null,
+              saveDirectoryName: message.saveDirectoryName || null,
+              collectionId: state.collectionId,
+              collectionCompletedAt: state.completedAt,
+              jobId: makeCollectionId(),
+              itemKeys: selectedKeys,
+              nextItemIndex: 0,
+              nextZipNumber: 1,
+              savedZipCount: 0,
+              processedItems: 0,
+              failedItems: 0,
+              totalSelected: selectedCount,
+              currentZipNumber: 1,
+              currentFileCount: 0,
+              progress: 0,
+              startedAt: Date.now(),
+              updatedAt: Date.now(),
+              completedAt: null,
+              completionAcknowledged: true,
+              completionAcknowledgedAt: null,
+              lastError: null,
+              failures: []
+            };
+          } else {
+            const frozen = Array.isArray(state.archive.itemKeys) ? state.archive.itemKeys.slice() : [];
+            const seen = new Set(frozen);
+            for (const key of selectedKeys) if (!seen.has(key)) { seen.add(key); frozen.push(key); }
+            if (selectedKeys.length || Array.isArray(state.archive.itemKeys)) state.archive.itemKeys = frozen;
+            state.archive.jobId = state.archive.jobId || makeCollectionId();
+            state.archive.status = 'archiving';
+            state.archive.runLimit = runLimit;
+            state.archive.mediaKind = mediaKind;
+            state.archive.saveMode = message.saveMode === 'directory' ? 'directory' : (state.archive.saveMode || 'downloads');
+            state.archive.saveDirectoryKey = message.saveDirectoryKey || state.archive.saveDirectoryKey || null;
+            state.archive.saveDirectoryName = message.saveDirectoryName || state.archive.saveDirectoryName || null;
+            state.archive.collectionId = state.collectionId;
+            state.archive.collectionCompletedAt = state.completedAt;
+            if (selectedKeys.length) state.archive.totalSelected = frozen.length;
+            state.archive.completedAt = null;
+            state.archive.completionAcknowledged = true;
+            state.archive.completionAcknowledgedAt = null;
+            state.archive.pauseReason = null;
+            state.archive.updatedAt = Date.now();
+            state.archive.lastError = null;
+          }
+
+          // 収集状態（paused / complete）はZIP処理と独立して保持する。
+          await setCollection(state);
+          const startResult = await chrome.runtime.sendMessage({
+            target: 'offscreen',
+            type: 'SMZ_OFFSCREEN_START_ARCHIVE',
+            platform,
+            handle,
+            jobId: state.archive.jobId,
             selection,
             splitMode,
             mediaKind,
             runLimit,
-            saveMode: message.saveMode === 'directory' ? 'directory' : 'downloads',
-            saveDirectoryKey: message.saveDirectoryKey || null,
-            saveDirectoryName: message.saveDirectoryName || null,
-            collectionId: state.collectionId,
-            collectionCompletedAt: state.completedAt,
-            nextItemIndex: 0,
-            nextZipNumber: 1,
-            savedZipCount: 0,
-            processedItems: 0,
-            failedItems: 0,
-            totalSelected: 0,
-            currentZipNumber: 1,
-            currentFileCount: 0,
-            progress: 0,
-            startedAt: Date.now(),
-            updatedAt: Date.now(),
-            completedAt: null,
-            completionAcknowledged: true,
-            completionAcknowledgedAt: null,
-            lastError: null,
-            failures: []
-          };
-        } else {
-          state.archive.status = 'archiving';
-          state.archive.runLimit = runLimit;
-          state.archive.mediaKind = mediaKind;
-          state.archive.saveMode = message.saveMode === 'directory' ? 'directory' : (state.archive.saveMode || 'downloads');
-          state.archive.saveDirectoryKey = message.saveDirectoryKey || state.archive.saveDirectoryKey || null;
-          state.archive.saveDirectoryName = message.saveDirectoryName || state.archive.saveDirectoryName || null;
-          state.archive.collectionId = state.collectionId;
-          state.archive.collectionCompletedAt = state.completedAt;
-          state.archive.completedAt = null;
-          state.archive.completionAcknowledged = true;
-          state.archive.completionAcknowledgedAt = null;
-          state.archive.pauseReason = null;
-          state.archive.updatedAt = Date.now();
-          state.archive.lastError = null;
-        }
-        // 収集状態（paused / complete）はZIP処理と独立して保持する。
-        // これにより、途中停止した収集結果を保存した後でも同じ位置から収集を再開できる。
-        await setCollection(state);
-
-        await chrome.runtime.sendMessage({
-          target: 'offscreen',
-          type: 'SMZ_OFFSCREEN_START_ARCHIVE',
-          platform,
-          handle,
-          selection,
-          splitMode,
-          mediaKind,
-          runLimit,
-          saveMode: state.archive?.saveMode || 'downloads',
-          saveDirectoryKey: state.archive?.saveDirectoryKey || null,
-          saveDirectoryName: state.archive?.saveDirectoryName || null
+            saveMode: state.archive?.saveMode || 'downloads',
+            saveDirectoryKey: state.archive?.saveDirectoryKey || null,
+            saveDirectoryName: state.archive?.saveDirectoryName || null
+          });
+          if (!startResult?.ok) {
+            if (priorArchive) state.archive = priorArchive;
+            else delete state.archive;
+            await setCollection(state);
+            throw new Error(startResult?.error || 'ZIP保存を開始できませんでした');
+          }
+          return state;
         });
-        sendResponse({ ok: true, state });
+        sendResponse({ ok: true, state: startedState });
         break;
       }
 
       case 'SMZ_STOP_ARCHIVE': {
-        await chrome.runtime.sendMessage({ target: 'offscreen', type: 'SMZ_OFFSCREEN_STOP_ARCHIVE' });
+        const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
+        const handle = normalizeHandle(message.handle);
+        const state = handle ? await getCollection(platform, handle) : null;
+        const jobId = String(message.jobId || state?.archive?.jobId || '');
+        if (!handle || !jobId) throw new Error('停止するZIP保存ジョブを確認できません');
+        const stopped = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'SMZ_OFFSCREEN_STOP_ARCHIVE', platform, handle, jobId });
+        if (!stopped?.ok) throw new Error(stopped?.error || 'ZIP保存を停止できませんでした');
         sendResponse({ ok: true });
         break;
       }
@@ -1815,6 +2004,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (current.deltaMode) current.deltaSavedKinds = { ...(current.deltaSavedKinds || {}),
               ...(current.archive.selection?.images ? { images: true } : {}),
               ...(current.archive.selection?.videos ? { videos: true } : {}) };
+            const processedKeys = Array.isArray(current.archive.itemKeys)
+              ? current.archive.itemKeys
+              : selectedArchiveItemKeys(current, current.archive.selection || {});
+            const savedKeys = new Set(Array.isArray(current.savedItemKeys) ? current.savedItemKeys : []);
+            for (const key of processedKeys) if (typeof key === 'string' && key) savedKeys.add(key);
+            current.savedItemKeys = [...savedKeys];
           }
           await setCollection(current);
           return current;

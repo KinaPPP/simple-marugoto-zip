@@ -1,3 +1,35 @@
+
+## v1.3.1 第三者QA回帰テスト
+
+第三者QAで確認された経路は、修正前に再現テストを失敗させてから実装修正しています。
+
+- `node tests/astra-review-regressions.test.cjs`
+  - ZIP再開順序の固定
+  - Threads認証ユーザーの固定
+  - ZIP単一ジョブ排他と停止対象の照合
+  - Threads基準投稿削除時の既知投稿境界
+- `node tests/astra-review-round2.test.cjs`
+  - 収集再開後に追加された未保存メディアがある場合、次の差分チェックを拒否
+  - `itemKeys` の無い旧版バックアップで現在のitems順を固定順序として捏造しない
+  - `delta_boundary_missing` では通常ZIP保存を拒否し、前回状態への復帰を維持
+  - 画像／動画を別ジョブで保存しても、確定済みメディアキーを統合して差分可否を判定
+  - 境界未確認をポップアップで未確定候補として表示し、ZIP保存を無効化
+- `node tests/astra-review-round3.test.cjs`
+  - 最終ZIPのcheckpointへ今回処理済みの `savedItemKeys` を反映し、途中ZIPには未処理後続キーを入れない
+  - 旧版の完了済みarchiveに明示された種別別 `itemKeys` を新形式へ引き継ぐ
+  - `itemKeys` が無い旧版状態では保存済みキーを推測せず、安全側の再保存判定を維持
+- `node tests/astra-review-round4.test.cjs`
+  - 300件成功＋最後の1件失敗でも、通常ダウンロード／直接フォルダ保存の双方でcheckpoint専用の終端ZIPを生成
+  - 終端checkpointの保存キャンセル／保存失敗時は直前の確定済みZIP位置・失敗履歴へロールバック
+  - 最新の終端ZIPから復元した `archive_complete`・処理位置・失敗件数・`savedItemKeys` がローカル状態と一致
+- `node tests/astra-review-round5.test.cjs`
+  - 未確定区間で取得失敗後に「ZIP保存を停止」した場合、処理位置・進捗・失敗履歴を直前の確定済みZIPへロールバック
+  - 停止→再開を繰り返しても同じ失敗を重複計上せず、再試行で成功した場合は未確定の失敗を残さない
+  - 過去の確定済みZIPに含まれる失敗履歴は停止ロールバック後も維持
+  - 通常ダウンロード／直接フォルダ保存の双方で、再開後のcheckpointとローカル状態を一致させる
+
+公開前は上記を含む `tests/*.cjs` 全件と、全JavaScriptの `node --check` を実行します。
+
 # v1.3.0 実機確認・回帰テスト
 
 v1.3.0の正式版は、Threads対応と設定画面再設計、API収集の復旧、差分スナップショットを追加しています。過去のX／Bluesky大量収集を毎回やり直す必要はありません。

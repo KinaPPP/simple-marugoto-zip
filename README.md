@@ -1,6 +1,6 @@
 # シンプルまるごとZIP / simple-marugoto-zip
 
-X（旧Twitter）・Bluesky・Threadsの投稿画像・動画を収集し、`images/`・`videos/` に分けてZIPで保存するChrome拡張機能です。作者 **KINA**、ライセンス **MIT**。現在のバージョンは **v1.3.0** です。
+X（旧Twitter）・Bluesky・Threadsの投稿画像・動画を収集し、`images/`・`videos/` に分けてZIPで保存するChrome拡張機能です。作者 **KINA**、ライセンス **MIT**。現在のバージョンは **v1.3.1** です。
 
 ## 主な機能
 
@@ -70,4 +70,4 @@ ZIP／JSONのインポートは**既存データを残して追加**が初期動
 
 本拡張はX・Bluesky・Threadsの非公式ツールです。利用先SNSの規則、アクセス制限、メディアの権利を確認してください。MITライセンスは第三者のメディアやSNSからの利用許可を意味しません。Threadsの公開プロフィール取得範囲はMeta側の権限・審査状態に依存します。Firefoxへの対応は今後の検討事項です。
 
-開発者向けのオフライン回帰テストは `node tests/<テスト名>.cjs` で実行できます。[変更履歴](CHANGELOG.md) / [v1.3.0リリースノート](docs/RELEASE_NOTES_v1.3.0.md) / [Threads実機検証記録](docs/THREADS_V1.3.0_TEST.md) / [テスト手順](TESTING.md) / [不具合の報告](.github/ISSUE_TEMPLATE) / [ライセンス](LICENSE)。
+開発者向けのオフライン回帰テストは `node tests/<テスト名>.cjs` で実行できます。[変更履歴](CHANGELOG.md) / [v1.3.1リリースノート](docs/RELEASE_NOTES_v1.3.1.md) / [Threads実機検証記録](docs/THREADS_V1.3.0_TEST.md) / [テスト手順](TESTING.md) / [不具合の報告](.github/ISSUE_TEMPLATE) / [ライセンス](LICENSE)。

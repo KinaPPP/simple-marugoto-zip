@@ -128,6 +128,11 @@ function cumulativeCountsForState(value) {
   if (!value.deltaMode) return current;
   const base = value.deltaBaselineCounts;
   if (!base || !Number.isFinite(Number(base.total))) return null;
+  // Boundary-missing items are only candidates. Do not present them as confirmed
+  // cumulative media until the previous snapshot boundary has been verified.
+  if (value.pauseReason === 'delta_boundary_missing' && value.deltaVerified !== true) {
+    return { images:Number(base.images || 0), videos:Number(base.videos || 0), total:Number(base.total || 0) };
+  }
   return {
     images: Number(base.images || 0) + current.images,
     videos: Number(base.videos || 0) + current.videos,
@@ -250,37 +255,67 @@ function archiveIsRunning() {
   return state?.archive?.status === 'archiving';
 }
 
-function archiveReachedEndForDelta() {
-  const archive = state?.archive;
+function isDeltaBoundaryMissing(value = state) {
+  return value?.deltaMode === true && value?.deltaVerified !== true && value?.pauseReason === 'delta_boundary_missing';
+}
+
+function canReturnToPreviousDelta(value = state) {
+  return value?.deltaMode === true && (isDeltaBoundaryMissing(value) || !Number(value?.archive?.savedZipCount || 0));
+}
+
+function archiveReachedEndForDelta(value = state) {
+  const archive = value?.archive;
   if (archive?.status !== 'archive_complete') return false;
   const total = Number(archive.totalSelected || 0);
   const next = Number(archive.nextItemIndex ?? archive.processedItems ?? 0);
   return total >= 0 && next >= total;
 }
 
-function effectiveSavedKindsForDelta(field) {
-  const saved = { ...(state?.[field] || {}) };
-  if (archiveReachedEndForDelta()) {
-    if (state.archive?.selection?.images) saved.images = true;
-    if (state.archive?.selection?.videos) saved.videos = true;
+function effectiveSavedKindsForDelta(field, value = state) {
+  const saved = { ...(value?.[field] || {}) };
+  if (archiveReachedEndForDelta(value)) {
+    if (value.archive?.selection?.images) saved.images = true;
+    if (value.archive?.selection?.videos) saved.videos = true;
   }
   return saved;
+}
+
+function archiveCoversCurrentCollectionForDelta(value = state) {
+  if (!archiveReachedEndForDelta(value)) return false;
+  const archive = value.archive;
+  const completedAt = Number(value.completedAt || 0);
+  const archiveCompletedAt = Number(archive?.collectionCompletedAt || 0);
+  if (completedAt && archiveCompletedAt && completedAt !== archiveCompletedAt) return false;
+  const selectedKeys = (Array.isArray(value.items) ? value.items : [])
+    .filter(item => (item.type === 'image' && archive?.selection?.images) || (item.type === 'video' && archive?.selection?.videos))
+    .map(item => item.key).filter(Boolean);
+  if (Array.isArray(archive?.itemKeys)) {
+    const frozen = new Set(archive.itemKeys);
+    if (!selectedKeys.every(key => frozen.has(key))) return false;
+  } else if (Number(archive?.totalSelected || 0) !== selectedKeys.length) {
+    return false;
+  }
+  return true;
+}
+
+function allCurrentMediaArchivedForDelta(value = state) {
+  const items = Array.isArray(value?.items) ? value.items : [];
+  if (!items.length) return false;
+  if (Array.isArray(value.savedItemKeys)) {
+    const saved = new Set(value.savedItemKeys);
+    return items.every(item => item?.key && saved.has(item.key));
+  }
+  if (!archiveCoversCurrentCollectionForDelta(value)) return false;
+  const saved = effectiveSavedKindsForDelta(value.deltaMode ? 'deltaSavedKinds' : 'savedKinds', value);
+  return (!value.counts?.images || saved.images === true) &&
+    (!value.counts?.videos || saved.videos === true);
 }
 
 function canCheckNewMedia() {
   if (state?.status !== 'complete' || !(['bluesky','threads'].includes(target?.platform) ? target?.platform === 'threads' ? /^\d{5,30}$/ : /^[a-zA-Z0-9._~-]{1,80}$/ : /^\d+$/).test(String(state.newestPostId || ''))) return false;
   if (state.archive?.status !== 'archive_complete') return false;
-  if (state.deltaMode) {
-    if (!state.deltaVerified) return false;
-    const saved = effectiveSavedKindsForDelta('deltaSavedKinds');
-    return (!state.counts?.images || saved.images === true) &&
-      (!state.counts?.videos || saved.videos === true);
-  }
-  // 旧版には savedKinds が無い場合がある。その場合は従来互換で許可する。
-  if (!state.savedKinds || typeof state.savedKinds !== 'object') return true;
-  const saved = effectiveSavedKindsForDelta('savedKinds');
-  return (!state.counts?.images || saved.images === true) &&
-    (!state.counts?.videos || saved.videos === true);
+  if (state.deltaMode && state.deltaVerified !== true) return false;
+  return allCurrentMediaArchivedForDelta(state);
 }
 
 function setArchiveUiLock(locked) {
@@ -319,6 +354,7 @@ function render() {
   const collectionComplete = state?.status === 'complete';
   const largeConfirmation = state?.status === 'awaiting_confirmation';
   const resetConfirmation = pendingConfirmation === 'reset';
+  const boundaryMissingDelta = isDeltaBoundaryMissing(state);
   const confirmationActive = largeConfirmation || resetConfirmation;
   const manualCollecting = state?.status === 'collecting' && state?.collectionMode === 'manual';
   const deltaCollecting = state?.status === 'collecting' && state?.deltaMode === true;
@@ -328,13 +364,13 @@ function render() {
     input.checked = input.value === shownMode;
     input.disabled = modeLocked;
   });
-  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || (isApi && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || !state?.counts?.total));
+  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || boundaryMissingDelta || (isApi && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || !state?.counts?.total));
   els.stopCollectBtn.disabled = archivingNow || confirmationActive || !(state?.status === 'collecting' || state?.status === 'rate_limited');
   setArchiveUiLock(archivingNow);
   els.resumeRow.classList.add('hidden');
   els.newOnlyBtn.classList.add('hidden');
   els.newOnlyBtn.disabled = true;
-  els.restartBtn.textContent = state?.deltaMode && !Number(state.archive?.savedZipCount || 0) ? '前回に戻す' : '進捗をリセット';
+  els.restartBtn.textContent = canReturnToPreviousDelta(state) ? '前回に戻す' : '進捗をリセット';
   els.confirmRow.classList.add('hidden');
   els.confirmActionBtn.classList.remove('danger');
   els.confirmActionBtn.classList.add('primary');
@@ -348,7 +384,7 @@ function render() {
     els.confirmRow.classList.remove('hidden');
     setProgress('none');
 
-    if (resetConfirmation && state?.deltaMode && !Number(state.archive?.savedZipCount || 0)) {
+    if (resetConfirmation && canReturnToPreviousDelta(state)) {
       els.statusTitle.textContent = '前回の収集状態に戻しますか？';
       els.statusDetail.textContent = '今回の差分チェック結果は破棄します。前回の収集結果とZIP情報は維持されます。';
       els.confirmCancelBtn.textContent = 'やめる';
@@ -430,24 +466,30 @@ function render() {
     } else if (state.status === 'paused') {
       const largeCancelled = state.pauseReason === 'large_cancelled';
       const resumeReady = state.pauseReason === 'resume_ready';
-      els.statusTitle.textContent = isApi && state.pauseReason === 'rate_limit' ? `${isThreads ? 'Threads' : 'Bluesky'}のアクセス制限で停止しました` : state.pauseReason === 'previous_missing'
-        ? '前回の収集状態を復元できません'
-        : largeCancelled
-        ? '大規模アカウントの収集を開始しませんでした'
-        : resumeReady
-          ? (state.rateLimitSimulated ? '疑似429テスト：手動再開待ち' : '待機時間が終了しました')
-          : '前回の作業があります';
-      const reason = ['error','auth'].includes(state.pauseReason) ? ` / ${state.lastError || 'エラーで停止'}` : '';
-      els.statusDetail.textContent = isApi && state.pauseReason === 'rate_limit' ? `${detailBase} / ${fmtTime(state.resumeAt)}以降に手動で再開してください` : state.pauseReason === 'previous_missing'
-        ? state.lastError
-        : largeCancelled
-        ? `X表示 約${fmtCount(state.displayMediaCount)}件 / 大きな青ボタンから再度開始できます`
-        : resumeReady
-          ? `${detailBase} / Xのメディアページを開き「収集を再開」を押してください`
-          : `@${state.handle} / ${detailBase}${reason}${total ? ' / ここまでをZIP保存できます' : ''}`;
+      if (boundaryMissingDelta) {
+        const previousTotal = Number(state.deltaBaselineCounts?.total || cumulative?.total || 0);
+        els.statusTitle.textContent = '前回の保存位置を確認できません';
+        els.statusDetail.textContent = `今回候補 ${fmtCount(total)}件は未確定です / 前回まで累計 ${fmtCount(previousTotal)}件。「前回に戻す」から安全に復帰してください。`;
+      } else {
+        els.statusTitle.textContent = isApi && state.pauseReason === 'rate_limit' ? `${isThreads ? 'Threads' : 'Bluesky'}のアクセス制限で停止しました` : state.pauseReason === 'previous_missing'
+          ? '前回の収集状態を復元できません'
+          : largeCancelled
+          ? '大規模アカウントの収集を開始しませんでした'
+          : resumeReady
+            ? (state.rateLimitSimulated ? '疑似429テスト：手動再開待ち' : '待機時間が終了しました')
+            : '前回の作業があります';
+        const reason = ['error','auth'].includes(state.pauseReason) ? ` / ${state.lastError || 'エラーで停止'}` : '';
+        els.statusDetail.textContent = isApi && state.pauseReason === 'rate_limit' ? `${detailBase} / ${fmtTime(state.resumeAt)}以降に手動で再開してください` : state.pauseReason === 'previous_missing'
+          ? state.lastError
+          : largeCancelled
+          ? `X表示 約${fmtCount(state.displayMediaCount)}件 / 大きな青ボタンから再度開始できます`
+          : resumeReady
+            ? `${detailBase} / Xのメディアページを開き「収集を再開」を押してください`
+            : `@${state.handle} / ${detailBase}${reason}${total ? ' / ここまでをZIP保存できます' : ''}`;
+      }
       setProgress('none');
       els.resumeRow.classList.remove('hidden');
-      els.collectBtn.textContent = '収集を再開';
+      els.collectBtn.textContent = boundaryMissingDelta ? '境界を確認できません' : '収集を再開';
     } else if (state.status === 'complete' || state.status === 'archive_complete' || state.status === 'archive_paused' || state.status === 'archive_error') {
       els.statusTitle.textContent = state.lastNewCheckResult === 0 ? '新規メディアはありません' :
         state.archive?.status === 'archive_complete' ? 'ZIP保存完了' : state.deltaMode ? '新規分の収集完了' : '収集完了';
@@ -475,7 +517,9 @@ function render() {
     els.statusDetail.textContent = target.apiError;
   }
   if (archiveStopPending && archive?.status !== 'archiving') archiveStopPending = false;
-  if (archiveStopPending && archive?.status === 'archiving') {
+  if (boundaryMissingDelta) {
+    els.zipBtn.textContent = 'ZIP保存できません';
+  } else if (archiveStopPending && archive?.status === 'archiving') {
     els.resumeRow.classList.add('hidden');
     const p = Math.round((archive.progress || 0) * 100);
     els.statusTitle.textContent = 'ZIP保存を停止しています…';
@@ -548,7 +592,7 @@ function render() {
   const selectedNow = (els.includeImages.checked ? Number(state?.counts?.images || 0) : 0) + (els.includeVideos.checked ? Number(state?.counts?.videos || 0) : 0);
   const sameSelectionAsArchive = currentMediaKind() === (state?.archive?.mediaKind || mediaKindFromSelection(state?.archive?.selection));
   const nothingNewAfterComplete = state?.archive?.status === 'archive_complete' && sameSelectionAsArchive && selectedNow <= Number(state.archive.totalSelected || 0);
-  els.zipBtn.disabled = !canZip || !selectedNow || archiveIsRunning() || nothingNewAfterComplete;
+  els.zipBtn.disabled = boundaryMissingDelta || !canZip || !selectedNow || archiveIsRunning() || nothingNewAfterComplete;
   els.stopZipBtn.disabled = !archiveIsRunning() || archiveStopPending;
 }
 
@@ -713,7 +757,7 @@ els.confirmCancelBtn.addEventListener('click', async () => {
 
 els.confirmActionBtn.addEventListener('click', async () => {
   if (pendingConfirmation === 'reset') {
-    const returnToPrevious = state?.deltaMode && !Number(state.archive?.savedZipCount || 0);
+    const returnToPrevious = canReturnToPreviousDelta(state);
     const directoryKey = state?.archive?.saveDirectoryKey || state?.preferredSaveDirectoryKey || null;
     const result = await chrome.runtime.sendMessage({
       type: returnToPrevious ? (target?.platform === 'bluesky' ? 'SMZ_BSKY_CANCEL_DELTA' : target?.platform === 'threads' ? 'SMZ_THREADS_CANCEL_DELTA' : 'SMZ_CANCEL_DELTA') : 'SMZ_RESET_COLLECTION', platform:target?.platform || 'x', handle:target.handle
@@ -784,7 +828,12 @@ els.stopZipBtn.addEventListener('click', async () => {
   noticeUntil = 0;
   setNotice('');
   render();
-  const result = await chrome.runtime.sendMessage({ type:'SMZ_STOP_ARCHIVE' });
+  const result = await chrome.runtime.sendMessage({
+    type:'SMZ_STOP_ARCHIVE',
+    platform:target?.platform,
+    handle:target?.handle,
+    jobId:state?.archive?.jobId || null
+  });
   if (!result?.ok) {
     archiveStopPending = false;
     setNotice(result?.error || 'ZIP保存を停止できませんでした', true);
