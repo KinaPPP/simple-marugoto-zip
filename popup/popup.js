@@ -53,6 +53,7 @@ let preferredCollectionMode = 'manual';
 let manualFinishBusy = false;
 let manualFinishFeedback = '';
 let noticeUntil = 0;
+let statusFeedback = null;
 let archiveStopPending = false;
 
 function getCurrentSettings() {
@@ -233,6 +234,28 @@ function setNotice(message, error = false) {
   els.notice.textContent = message;
 }
 
+function setStatusFeedback(message, error = false, duration = 6000) {
+  statusFeedback = message ? { message, error, until: Date.now() + duration } : null;
+}
+
+function currentStatusFeedback() {
+  if (!statusFeedback) return null;
+  if (Date.now() >= statusFeedback.until) {
+    statusFeedback = null;
+    return null;
+  }
+  return statusFeedback;
+}
+
+function applyStatusFeedback() {
+  const feedback = currentStatusFeedback();
+  els.statusDetail.classList.remove('status-feedback-error');
+  if (!feedback) return false;
+  els.statusDetail.textContent = feedback.message;
+  els.statusDetail.classList.toggle('status-feedback-error', feedback.error);
+  return true;
+}
+
 function setProgress(mode, percent = 0) {
   if (mode === 'none') {
     els.progressTrack.className = 'progress-track hidden';
@@ -253,6 +276,37 @@ function setProgress(mode, percent = 0) {
 
 function archiveIsRunning() {
   return state?.archive?.status === 'archiving';
+}
+
+function currentSaveDirectoryInfo() {
+  const key = state?.archive?.saveDirectoryKey || state?.preferredSaveDirectoryKey || null;
+  const name = state?.archive?.saveDirectoryName || state?.preferredSaveDirectoryName || null;
+  return key ? { key, name } : null;
+}
+
+function canChangeSaveDirectory() {
+  const info = currentSaveDirectoryInfo();
+  const collectionAllowsChange = !!state && state.status !== 'collecting' && state.status !== 'awaiting_confirmation';
+  return !!(target && info?.key && collectionAllowsChange && !archiveIsRunning() && !archiveStopPending &&
+    globalThis.SMZFileSystem && ('showDirectoryPicker' in window));
+}
+
+function renderSaveDirectoryChangeControl() {
+  const info = currentSaveDirectoryInfo();
+  if (!info || !canChangeSaveDirectory()) return;
+
+  const detail = els.statusDetail.textContent || '';
+  if (!detail.includes('保存先:')) {
+    els.statusDetail.append(document.createTextNode(`${detail ? ' / ' : ''}保存先: ${info.name || '選択済み'}`));
+  }
+  els.statusDetail.append(document.createTextNode(' '));
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'save-dir-change';
+  button.textContent = '[変更]';
+  button.title = '次のZIPから保存先フォルダを変更';
+  button.addEventListener('click', changeSaveDirectory);
+  els.statusDetail.append(button);
 }
 
 function isDeltaBoundaryMissing(value = state) {
@@ -375,6 +429,7 @@ function render() {
   els.confirmActionBtn.classList.remove('danger');
   els.confirmActionBtn.classList.add('primary');
   els.statusPanel.classList.remove('archive-error');
+  els.statusDetail.classList.remove('status-feedback-error');
   setNotice('');
 
   if (confirmationActive) {
@@ -586,6 +641,9 @@ function render() {
     els.zipBtn.textContent = 'ZIPで保存';
   }
 
+  renderSaveDirectoryChangeControl();
+  applyStatusFeedback();
+
   const hasCollectedMedia = (state?.counts?.total || 0) > 0;
   const collectionCanZip = ['paused', 'complete'].includes(state?.status);
   const canZip = supported && state && hasCollectedMedia && collectionCanZip;
@@ -783,6 +841,47 @@ els.confirmActionBtn.addEventListener('click', async () => {
     await refresh();
   }
 });
+
+async function changeSaveDirectory() {
+  if (!canChangeSaveDirectory()) return;
+  const fs = globalThis.SMZFileSystem;
+  const directory = currentSaveDirectoryInfo();
+  if (!fs || !directory?.key) return;
+
+  let previousHandle = null;
+  let replacedHandle = false;
+  try {
+    previousHandle = await fs.getHandle(directory.key);
+    const picked = await fs.pickDirectory(directory.key);
+    replacedHandle = true;
+    const name = picked?.name || directory.name || '選択したフォルダ';
+    const result = await chrome.runtime.sendMessage({
+      type:'SMZ_CHANGE_SAVE_DIRECTORY',
+      platform:target.platform,
+      handle:target.handle,
+      saveDirectoryKey:directory.key,
+      saveDirectoryName:name
+    });
+    if (!result?.ok) throw new Error(result?.error || '保存先フォルダを変更できませんでした');
+    state = result.state || state;
+    setStatusFeedback(`保存先を「${name}」に変更しました。次のZIPから使用します。`);
+    await refresh();
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      setStatusFeedback('保存先フォルダの変更をキャンセルしました。');
+      render();
+      return;
+    }
+    if (replacedHandle) {
+      try {
+        if (previousHandle) await fs.setHandle(directory.key, previousHandle);
+        else await fs.removeHandle(directory.key);
+      } catch {}
+    }
+    setStatusFeedback(error?.message || '保存先フォルダを変更できませんでした', true);
+    render();
+  }
+}
 
 async function startArchive() {
   const split = document.querySelector('input[name="split"]:checked')?.value || 'auto';

@@ -52,6 +52,9 @@ body {
 .status-head strong { color:var(--sub); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #statusPercent { font-size:11px; font-weight:800; color:var(--blue); flex:0 0 auto; }
 .status-detail { margin-top:3px; height:27px; color:var(--muted); font-size:10px; line-height:1.35; overflow:hidden; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+.save-dir-change { border:0; background:transparent; color:var(--blue); padding:0 2px; font:inherit; font-weight:800; cursor:pointer; white-space:nowrap; vertical-align:baseline; }
+.save-dir-change:hover:not(:disabled) { text-decoration:underline; }
+.save-dir-change:disabled { color:var(--muted); cursor:not-allowed; text-decoration:none; }
 .progress-track { margin-top:5px; width:100%; height:6px; border-radius:10px; overflow:hidden; background:#ddd; }
 .progress-bar { height:100%; width:0; background:var(--blue); border-radius:10px; transition:width .2s; }
 .progress-track.indeterminate .progress-bar { width:35%; animation:slide 1.2s ease-in-out infinite; }
@@ -94,3 +97,4 @@ input[type="checkbox"], input[type="radio"] { accent-color:var(--blue); vertical
 #mediaHint.empty-selection { color:#a33b24; font-weight:700; }
 
 .status-panel.archive-error .status-detail { color:#991b1b; font-weight:650; }
+.status-detail.status-feedback-error { color:#991b1b; font-weight:650; }

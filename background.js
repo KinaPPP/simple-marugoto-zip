@@ -1814,6 +1814,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case 'SMZ_CHANGE_SAVE_DIRECTORY': {
+        if (sender.url !== chrome.runtime.getURL('popup/popup.html')) throw new Error('ポップアップから操作してください');
+        const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
+        const handle = normalizeHandle(message.handle);
+        const directoryKey = String(message.saveDirectoryKey || '');
+        const directoryName = String(message.saveDirectoryName || '').trim();
+        if (!handle) throw new Error('対象アカウントを確認できません');
+        if (!/^archive-directory:[a-zA-Z0-9._-]{1,100}$/.test(directoryKey)) throw new Error('保存先情報を確認できません');
+        if (!directoryName || directoryName.length > 255) throw new Error('保存先フォルダ名を確認できません');
+
+        const outcome = await withCollectionLock(platform, handle, async current => {
+          if (!current) return { error:'保存済みの収集状態が見つかりません' };
+          if (current.archive?.status === 'archiving') return { error:'ZIP保存中は保存先フォルダを変更できません' };
+          const expectedKey = current.archive?.saveDirectoryKey || current.preferredSaveDirectoryKey || null;
+          if (!expectedKey || expectedKey !== directoryKey) return { error:'現在の保存先情報が変更されています。状態を更新してください' };
+
+          const applyDirectory = value => {
+            if (!value || typeof value !== 'object') return;
+            value.preferredSaveDirectoryKey = directoryKey;
+            value.preferredSaveDirectoryName = directoryName;
+            if (value.archive && typeof value.archive === 'object') {
+              value.archive.saveDirectoryKey = directoryKey;
+              value.archive.saveDirectoryName = directoryName;
+              value.archive.updatedAt = Date.now();
+            }
+            value.updatedAt = Date.now();
+          };
+
+          applyDirectory(current);
+          const previousKey = previousCollectionKey(platform, handle);
+          const previousStored = (await chrome.storage.local.get(previousKey))[previousKey];
+          if (previousStored) {
+            applyDirectory(previousStored);
+            await chrome.storage.local.set({ [previousKey]: previousStored });
+          }
+          await setCollection(current);
+          return { state:current };
+        });
+        if (outcome?.error) throw new Error(outcome.error);
+        sendResponse({ ok: true, state: outcome?.state || null });
+        break;
+      }
+
       case 'SMZ_START_ARCHIVE': {
         const startedState = await withArchiveStartLock(async () => {
           const handle = normalizeHandle(message.handle);
