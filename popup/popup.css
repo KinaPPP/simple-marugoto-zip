@@ -5,10 +5,10 @@
   --blue:#4a8ce0; --blue-h:#3a7bd5; --green:#28a745; --green-h:#218838;
   --red:#dc2626; --r:9px; --rs:6px;
 }
-html, body { margin:0; padding:0; }
+html, body { margin:0; padding:0; background:var(--bg); }
 body {
   width: 410px;
-  height: 590px;
+  height: 560px;
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
