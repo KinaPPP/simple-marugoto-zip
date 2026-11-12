@@ -10,7 +10,7 @@
   <header class="header">
     <img src="../icons/icon48.png" class="logo" alt="">
     <div class="title-wrap">
-      <div class="title">シンプルまるごとZIP <span class="ver">v1.3.2</span></div>
+      <div class="title">シンプルまるごとZIP <span class="ver">v1.3.13</span></div>
       <div class="subtitle">X メディア一括保存</div>
     </div>
     <button id="optionsBtn" class="icon-btn" title="設定">⚙</button>
@@ -91,11 +91,14 @@
     <div class="hint one-line">初回の動作確認向け。選択した設定は次回も記憶します。</div>
   </section>
 
+  <p class="hint">保存先の選択・変更は別タブで行います。「常に許可」を選んでいない場合は、連続するZIP保存がすべて終わるまで選択タブを閉じないでください。</p>
   <div class="zip-row">
     <button id="zipBtn" class="btn btn-green" disabled>ZIPで保存</button>
     <button id="stopZipBtn" class="btn btn-stop" disabled>中止</button>
   </div>
 
+  <script src="../debug/trace-core.js"></script>
+  <script src="../debug/trace-client.js"></script>
   <script src="../archive/fs-access.js"></script>
   <script src="popup.js"></script>
 </body>

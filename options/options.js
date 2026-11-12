@@ -3,6 +3,8 @@
 // ZIP/JSONを置くだけで安全な追加。上書きや全体削除だけを明示的に確認する。
 (() => {
   const $ = (id) => document.getElementById(id);
+  const versionEl = $('extensionVersion');
+  if (versionEl) versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
   const exportBtn = $('exportBackupBtn');
   const input = $('backupFileInput');
   const drop = $('backupDropZone');

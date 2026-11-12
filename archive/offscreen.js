@@ -300,6 +300,8 @@ async function createDirectZipWriter(directoryKey, filename) {
         setU16(eocd, 20, 0);
         await writable.write(new Uint8Array(eocd.buffer));
         await writable.close();
+        // close成功だけで完了扱いにせず、実ファイルの存在・サイズを検証。
+        if (opened.verify) await opened.verify(centralOffset + centralSize + 22);
         closed = true;
         return {
           filename: opened.filename || filename,
@@ -562,6 +564,12 @@ async function runArchiveDirectory(job, state, previous, archive, items, limits,
       zipNumber++;
     } catch (error) {
       if (writer) await writer.abort();
+      await rollbackUnpersistedArchiveProgress(job.handle, chunkStartIndex,
+        committedFailedItems, committedFailures, items.length, {
+          currentZipNumber: zipNumber,
+          currentFileCount: 0,
+          batchSaved: committedRunDownloaded
+        });
       throw error;
     }
   }
@@ -632,6 +640,7 @@ async function patchArchive(handle, patch) {
     patch
   });
   if (!result?.ok) throw new Error(result?.error || '進捗保存に失敗しました');
+  globalThis.SMZDirectoryTrace?.changed('writer.progress.persisted', handle, globalThis.SMZDirectoryTrace.snapshot(result.state));
   return result.state;
 }
 
@@ -686,10 +695,18 @@ async function runArchive(job) {
   // function starts. Do not clear cancelRequested here: a stop can arrive in the
   // short window between the start acknowledgement and this task running.
   activeJob = job;
+  globalThis.SMZDirectoryTrace?.setScope({jobId:job.jobId,traceId:job.traceId,platform:job.platform,account:job.handle});
+  globalThis.SMZDirectoryTrace?.emit('writer.job.begin', {directoryKey:job.saveDirectoryKey,directoryName:job.saveDirectoryName});
+
+  if (job.saveMode === 'directory' && job.saveDirectoryKey) {
+    if (globalThis.SMZFileSystem?.reloadDirectory) await SMZFileSystem.reloadDirectory(job.saveDirectoryKey);
+    else globalThis.SMZFileSystem?.invalidateDirectory?.(job.saveDirectoryKey);
+  }
 
   const stateResult = await runtimeMessage({ type: 'SMZ_ARCHIVE_GET_STATE', platform: job.platform || 'x', handle: job.handle });
   if (!stateResult?.ok || !stateResult.state) throw new Error(stateResult?.error || '収集データを読み込めません');
   let state = stateResult.state;
+  globalThis.SMZDirectoryTrace?.emit('writer.state.loaded', globalThis.SMZDirectoryTrace.snapshot(state));
   const previous = stateResult.previous || null;
   let archive = state.archive || {};
   const items = selectedItems(state, job.selection);
@@ -910,8 +927,42 @@ async function runArchive(job) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== 'offscreen') return;
 
+  if (message.type === 'SMZ_OFFSCREEN_TRACE_RENEW') {
+    globalThis.SMZDirectoryTrace?.renewContext();
+    sendResponse({ok:true});
+    return true;
+  }
+
   if (message.type === 'SMZ_OFFSCREEN_GET_STATUS') {
     sendResponse({ active: !!activeJob, handle: activeJob?.handle || null, platform: activeJob?.platform || null, jobId: activeJob?.jobId || null });
+    return true;
+  }
+
+  if (message.type === 'SMZ_OFFSCREEN_PREPARE_DIRECTORY') {
+    globalThis.SMZDirectoryTrace?.emit('writer.directory.prepare', {traceId:message.traceId,directoryKey:message.key,ok:!activeJob});
+    if (activeJob) { sendResponse({ok:false,error:'ZIP保存中は保存先フォルダを変更できません'}); return true; }
+    if (typeof message.key !== 'string' || !/^archive-directory:change-[a-zA-Z0-9-]{1,80}$/.test(message.key)) {
+      sendResponse({ok:false,error:'保存先が不正です'}); return true;
+    }
+    SMZFileSystem.invalidateDirectory(message.key);
+    SMZFileSystem.ensureWritableDirectory(message.key, false)
+      .then(async handle => {
+        await SMZFileSystem.diagnoseDirectoryIdentity?.(message.key,handle,'writer.prepare');
+        globalThis.SMZDirectoryTrace?.emit('writer.directory.prepared',{traceId:message.traceId,directoryKey:message.key,directoryName:handle.name,...SMZFileSystem.directoryDetails?.(handle)});
+        sendResponse({ok:true,name:handle.name});
+      })
+      .catch(error => {globalThis.SMZDirectoryTrace?.failure('writer.directory.prepareFailed',error,{traceId:message.traceId,directoryKey:message.key});sendResponse({ok:false,error:error.message || '保存先の権限を確認できませんでした'});});
+    return true;
+  }
+
+  if (message.type === 'SMZ_OFFSCREEN_INVALIDATE_DIRECTORY') {
+    if (activeJob) { sendResponse({ok:false,error:'ZIP保存中は保存先フォルダを変更できません'}); return true; }
+    if (typeof message.key !== 'string' || !/^archive-directory:[a-zA-Z0-9._-]{1,100}$/.test(message.key)) {
+      sendResponse({ok:false,error:'保存先が不正です'});
+      return true;
+    }
+    SMZFileSystem.invalidateDirectory(message.key);
+    sendResponse({ok:true});
     return true;
   }
 
@@ -959,6 +1010,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     const job = {
+      traceId:message.traceId,
       jobId: message.jobId || `${Date.now()}_${Math.random().toString(36).slice(2,10)}`,
       platform: message.platform || 'x',
       handle: message.handle,
@@ -971,11 +1023,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       saveDirectoryName: message.saveDirectoryName || null
     };
     // Reserve synchronously so two starts cannot both observe an idle offscreen worker.
+    // 実行タスク内でIDBを読み直し、同一実体の場合だけ確認済みハンドルを維持。
     cancelRequested = false;
     activeJob = job;
     sendResponse({ ok:true, jobId:job.jobId });
     Promise.resolve().then(() => runArchive(job))
       .catch(async (error) => {
+        globalThis.SMZDirectoryTrace?.failure('writer.job.failed',error,{jobId:job.jobId,traceId:job.traceId,directoryKey:job.saveDirectoryKey});
         const messageText = String(error?.message || error || '');
         if (messageText === 'cancelled') return;
         const userCancelled = /USER_CANCELED|USER_CANCELLED/i.test(messageText);
@@ -999,6 +1053,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch {}
       })
       .finally(() => {
+        globalThis.SMZDirectoryTrace?.emit('writer.job.finished', {jobId:job.jobId,traceId:job.traceId});
+        globalThis.SMZDirectoryTrace?.setScope({});
         if (activeJob === job) activeJob = null;
         cancelRequested = false;
       });

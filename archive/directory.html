@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>保存先フォルダの変更</title>
+  <style>
+    body { max-width: 680px; margin: 48px auto; padding: 0 24px; font: 16px/1.8 system-ui,sans-serif; color: #202124; }
+    h1 { font-size: 24px; } button { padding: 12px 22px; font: inherit; cursor: pointer; }
+    #result { white-space: pre-wrap; overflow-wrap: anywhere; } .error { color: #b3261e; }
+    .permission-note { padding: 16px 20px; background: #fff5d6; border-left: 4px solid #d39b00; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>保存先フォルダの変更</h1>
+  <p id="target"></p>
+  <p id="current">現在の保存先を確認しています…</p>
+  <p>下のボタンからフォルダを選び、Chromeの確認画面で許可してください。変更は次のZIP保存から適用されます。</p>
+  <aside class="permission-note" aria-label="保存中のタブについて">
+    <strong>「常に許可」を選んでいない場合は、保存が終わるまでこのタブを閉じないでください。</strong>
+    <p>Chromeに「サイトアクセス時は常に許可」が出たら、その項目を選んでください。選択済みの場合は、保存先の変更完了後にこのタブを閉じて保存できます。</p>
+    <p>選択肢が出なかった場合、「今回のみ許可」を選んだ場合、どちらを選んだか分からない場合は、連続するZIP保存がすべて終わるまでこのタブを開いたままにしてください。途中で閉じると保存先の再選択が必要になることがあります。</p>
+  </aside>
+  <p><label>診断用の識別名（任意） <input id="traceLabel" maxlength="120" placeholder="例 D:\test / G:\test"></label><br><small>同名フォルダを区別するためのメモです。自動取得したパスではなく、診断ログに記録されます。</small></p>
+  <button id="choose" type="button" disabled>保存先フォルダを選ぶ</button>
+  <p id="result" role="status" aria-live="polite"></p>
+  <p>変更完了後は、拡張機能の小窓を開き直してZIP保存を開始・再開してください。このタブを閉じてよいかは、上の許可の案内を確認してください。</p>
+  <script src="../debug/trace-core.js"></script>
+  <script src="../debug/trace-client.js"></script>
+  <script src="fs-access.js"></script>
+  <script src="directory.js"></script>
+</body>
+</html>

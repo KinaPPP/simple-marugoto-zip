@@ -113,7 +113,7 @@ async function testZip() {
   assert.equal(checkpoints[1].archive.nextItemIndex,12);
   assert.equal(checkpoints[1].archive.nextZipNumber,3);
   assert.equal(checkpoints[1].savedKinds.images,true);
-  const out=path.join('/mnt/data','smz21_zip_checkpoint_test');
+  const out=path.resolve(__dirname,'..','..','test-artifacts','smz21_zip_checkpoint_test');
   fs.mkdirSync(out,{recursive:true});
   for(const {name,buffer} of zipOutputs) fs.writeFileSync(path.join(out,name),buffer);
   console.log('PASS streaming ZIP: 10+2 media, all chunks include metadata, 001 resumes at 11th, 002 complete, deflate/store reader, CRC');

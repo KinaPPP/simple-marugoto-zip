@@ -1,3 +1,4 @@
+if (typeof importScripts === 'function') importScripts('debug/trace-core.js','debug/trace-store.js','debug/trace-client.js');
 if (!globalThis.SMZBackup) importScripts('backup/schema.js');
 if (!globalThis.SMZBluesky && typeof importScripts === 'function') importScripts('providers/bluesky/api.js');
 if (!globalThis.SMZThreads && typeof importScripts === 'function') importScripts('providers/threads/api.js');
@@ -13,6 +14,8 @@ const THREADS_ALARM = 'smz_threads_token_refresh';
 const API_COLLECTION_WATCHDOG_ALARM = 'smz_api_collection_watchdog';
 let apiRecoveryPromise = Promise.resolve();
 let fullResetInProgress = false;
+const directoryTraceTabs = new Map();
+let directoryTraceGeneration = 0;
 
 // Blob URLの仮ファイル名(UUID)に負けないよう、拡張自身のZIPだけ
 // onDeterminingFilenameでも明示的に保存名を提案する。
@@ -467,8 +470,10 @@ async function getCollection(platform, handle) {
     const previous = (await chrome.storage.local.get(prevKey))[prevKey] || null;
     const baselineCounts = SMZBackup.cumulativeCounts(previous);
     if (baselineCounts) {
+      globalThis.SMZDirectoryTrace?.emit('state.migration.beforeWrite', {...globalThis.SMZDirectoryTrace.snapshot(state),phase:'delta-baseline'});
       state = { ...state, deltaBaselineCounts: baselineCounts };
       await chrome.storage.local.set({ [key]: state });
+      globalThis.SMZDirectoryTrace?.emit('state.migration.persisted', globalThis.SMZDirectoryTrace.snapshot(state));
     }
   }
   return state;
@@ -477,6 +482,7 @@ async function getCollection(platform, handle) {
 async function setCollection(state) {
   const key = collectionKey(state.platform, state.handle);
   await chrome.storage.local.set({ [key]: state });
+  globalThis.SMZDirectoryTrace?.changed('state.persisted', key, globalThis.SMZDirectoryTrace.snapshot(state));
   // 大量件数の確認待ちは現在表示中のアカウントにだけ「確」を出すため、
   // アクティブタブを見てからツールバーを復元する。その他の進行状態は即時反映する。
   if (state?.status === 'awaiting_confirmation') void restoreToolbarState();
@@ -504,7 +510,10 @@ async function acknowledgeArchiveCompletions() {
     };
   }
 
-  if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+  if (Object.keys(updates).length) {
+    await chrome.storage.local.set(updates);
+    for (const value of Object.values(updates)) globalThis.SMZDirectoryTrace?.emit('state.ack.persisted', globalThis.SMZDirectoryTrace.snapshot(value));
+  }
   return Object.keys(updates).length;
 }
 
@@ -517,7 +526,7 @@ function withCollectionLock(platform, handle, fn) {
       const state = await getCollection(platform, handle);
       return fn(state);
     });
-  const wrapped = next.finally(() => {
+  const wrapped = next.catch(() => {}).finally(() => {
     if (collectionQueues.get(key) === wrapped) collectionQueues.delete(key);
   });
   collectionQueues.set(key, wrapped);
@@ -1120,6 +1129,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target === 'offscreen') return false;
 
   (async () => {
+    if (['SMZ_TRACE_EVENT','SMZ_TRACE_GET','SMZ_TRACE_CLEAR'].includes(message.type)) {
+      const base = chrome.runtime.getURL('');
+      const url = String(sender.url || '');
+      const page = url.startsWith(base) ? url.slice(base.length).split(/[?#]/)[0] : '';
+      if (sender.id !== chrome.runtime.id || !['popup/popup.html','archive/directory.html','archive/offscreen.html','debug/directory-log.html'].includes(page)) throw new Error('拡張の診断画面から操作してください');
+      const store = globalThis.SMZDirectoryTraceStore;
+      if (message.type === 'SMZ_TRACE_EVENT') {
+        if (fullResetInProgress) {sendResponse({ok:true,discarded:true});return;}
+        const record = globalThis.SMZDirectoryTraceCore?.record(message.record,page);
+        const traceGeneration = directoryTraceGeneration;
+        const pending = store?.append(record && {...record,fields:{...record.fields,tabId:sender.tab?.id}}, page);
+        void pending?.then(accepted => {
+          if (!accepted || fullResetInProgress || traceGeneration !== directoryTraceGeneration) return;
+          if (page === 'archive/directory.html' && sender.tab?.id != null) {
+            const prior = directoryTraceTabs.get(sender.tab.id) || {};
+            directoryTraceTabs.set(sender.tab.id,{directoryKey:record.fields.directoryKey||prior.directoryKey,traceId:record.fields.traceId||prior.traceId,source:record.contextId});
+            if (directoryTraceTabs.size>200) directoryTraceTabs.delete(directoryTraceTabs.keys().next().value);
+          }
+        });
+        sendResponse({ok:true});return;
+      }
+      if (page !== 'debug/directory-log.html') throw new Error('診断ログ画面から操作してください');
+      if (message.type === 'SMZ_TRACE_CLEAR') { const cleared=await store?.clear();sendResponse(cleared||{ok:false,error:'診断ログの保存機能を利用できません'});return; }
+      const all = await chrome.storage.local.get(null);
+      const current = Object.entries(all).filter(([key])=>key.startsWith(COLLECTION_PREFIX)).map(([,state])=>globalThis.SMZDirectoryTrace?.snapshot(state));
+      sendResponse({ok:true,version:chrome.runtime.getManifest().version,extensionId:chrome.runtime.id,current,log:await store?.get()});return;
+    }
     // 全体初期化と新しい保存/収集の競合を防ぐ。
     if (fullResetInProgress && !['SMZ_SYNC_TOOLBAR', 'SMZ_BACKUP_RESET_ALL'].includes(message.type)) {
       throw new Error('データを初期化しています。完了後に操作してください');
@@ -1814,29 +1850,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case 'SMZ_COMMIT_SAVE_DIRECTORY':
       case 'SMZ_CHANGE_SAVE_DIRECTORY': {
-        if (sender.url !== chrome.runtime.getURL('popup/popup.html')) throw new Error('ポップアップから操作してください');
+        const stagedChange = message.type === 'SMZ_COMMIT_SAVE_DIRECTORY';
+        globalThis.SMZDirectoryTrace?.emit('directory.commit.request', {traceId:message.traceId,expectedKey:message.saveDirectoryKey,newKey:message.candidateKey});
+        if (stagedChange) {
+          if (sender.url?.split('?')[0] !== chrome.runtime.getURL('archive/directory.html')) throw new Error('保存先選択画面から操作してください');
+        } else if (sender.url !== chrome.runtime.getURL('popup/popup.html')) throw new Error('ポップアップから操作してください');
         const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
         const handle = normalizeHandle(message.handle);
-        const directoryKey = String(message.saveDirectoryKey || '');
-        const directoryName = String(message.saveDirectoryName || '').trim();
+        const directoryKey = message.saveDirectoryKey ? String(message.saveDirectoryKey) : null;
+        let directoryName = String(message.saveDirectoryName || '').trim();
+        const candidateKey = String(message.candidateKey || '');
+        const nextDirectoryKey = stagedChange ? candidateKey : directoryKey;
         if (!handle) throw new Error('対象アカウントを確認できません');
-        if (!/^archive-directory:[a-zA-Z0-9._-]{1,100}$/.test(directoryKey)) throw new Error('保存先情報を確認できません');
-        if (!directoryName || directoryName.length > 255) throw new Error('保存先フォルダ名を確認できません');
+        if ((!stagedChange && !directoryKey) || (directoryKey !== null && !/^archive-directory:[a-zA-Z0-9._-]{1,100}$/.test(directoryKey))) throw new Error('保存先情報を確認できません');
+        if (stagedChange) {
+          if (!/^archive-directory:change-[a-zA-Z0-9-]{1,80}$/.test(candidateKey)) throw new Error('選択した保存先情報を確認できません');
+        } else if (!directoryName || directoryName.length > 255) throw new Error('保存先フォルダ名を確認できません');
 
-        const outcome = await withCollectionLock(platform, handle, async current => {
+        // ZIP開始と変更確定を直列化し、offscreenの確認応答より先に表示を変えない。
+        const outcome = await withArchiveStartLock(() => withCollectionLock(platform, handle, async current => {
+          globalThis.SMZDirectoryTrace?.emit('directory.commit.current', {...globalThis.SMZDirectoryTrace.snapshot(current),traceId:message.traceId});
           if (!current) return { error:'保存済みの収集状態が見つかりません' };
+          if (['collecting','awaiting_confirmation'].includes(current.status)) return { error:'収集中は保存先フォルダを変更できません' };
           if (current.archive?.status === 'archiving') return { error:'ZIP保存中は保存先フォルダを変更できません' };
           const expectedKey = current.archive?.saveDirectoryKey || current.preferredSaveDirectoryKey || null;
-          if (!expectedKey || expectedKey !== directoryKey) return { error:'現在の保存先情報が変更されています。状態を更新してください' };
+          if (expectedKey !== directoryKey) return { error:'現在の保存先情報が変更されています。状態を更新してください' };
+
+          if (stagedChange) {
+            await ensureOffscreenDocument();
+            const prepared = await chrome.runtime.sendMessage({
+              target:'offscreen', type:'SMZ_OFFSCREEN_PREPARE_DIRECTORY', key:candidateKey,traceId:message.traceId
+            });
+            globalThis.SMZDirectoryTrace?.emit('directory.commit.permissionResult', {traceId:message.traceId,directoryKey:candidateKey,ok:prepared?.ok===true,directoryName:prepared?.name||null,errorMessage:prepared?.error||null});
+            if (prepared?.ok !== true) return { error:prepared?.error || '保存先の権限を確認できませんでした' };
+            directoryName = String(prepared.name || '').trim();
+            if (!directoryName || directoryName.length > 255) return { error:'保存先フォルダ名を確認できません' };
+          } else if (await chrome.offscreen.hasDocument()) {
+            const invalidated = await chrome.runtime.sendMessage({
+              target:'offscreen', type:'SMZ_OFFSCREEN_INVALIDATE_DIRECTORY', key:directoryKey
+            });
+            if (invalidated?.ok !== true) return { error:invalidated?.error || '保存先の切り替えを確認できませんでした' };
+          }
 
           const applyDirectory = value => {
             if (!value || typeof value !== 'object') return;
-            value.preferredSaveDirectoryKey = directoryKey;
+            value.preferredSaveDirectoryKey = nextDirectoryKey;
             value.preferredSaveDirectoryName = directoryName;
             if (value.archive && typeof value.archive === 'object') {
-              value.archive.saveDirectoryKey = directoryKey;
+              value.archive.saveDirectoryKey = nextDirectoryKey;
               value.archive.saveDirectoryName = directoryName;
+              if (stagedChange && value.archive.pauseReason === 'save_permission') {
+                value.archive.pauseReason = null;
+                value.archive.lastError = null;
+              }
               value.archive.updatedAt = Date.now();
             }
             value.updatedAt = Date.now();
@@ -1845,15 +1913,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           applyDirectory(current);
           const previousKey = previousCollectionKey(platform, handle);
           const previousStored = (await chrome.storage.local.get(previousKey))[previousKey];
+          const updates = { [collectionKey(platform, handle)]:current };
           if (previousStored) {
             applyDirectory(previousStored);
-            await chrome.storage.local.set({ [previousKey]: previousStored });
+            updates[previousKey] = previousStored;
           }
-          await setCollection(current);
+          // 現在・前回スナップショットを同じ保存操作で切り替える。
+          await chrome.storage.local.set(updates);
+          globalThis.SMZDirectoryTrace?.emit('directory.commit.persisted', {...globalThis.SMZDirectoryTrace.snapshot(current),traceId:message.traceId});
+          void scheduleToolbarState(current);
           return { state:current };
-        });
+        }));
         if (outcome?.error) throw new Error(outcome.error);
-        sendResponse({ ok: true, state: outcome?.state || null });
+        sendResponse({ ok: true, state: outcome?.state || null, saveDirectoryName:directoryName });
         break;
       }
 
@@ -1862,9 +1934,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const handle = normalizeHandle(message.handle);
           const platform = ['x','bluesky','threads'].includes(message.platform) ? message.platform : 'x';
           const state = await getCollection(platform, handle);
+          globalThis.SMZDirectoryTrace?.emit('archive.start.request', {...globalThis.SMZDirectoryTrace.snapshot(state),traceId:message.traceId,expectedKey:message.expectedSaveDirectoryKey,directoryKey:message.saveDirectoryKey,directoryName:message.saveDirectoryName});
           const collectionCanArchive = state && ['paused', 'complete'].includes(state.status);
           if (!state || !collectionCanArchive) {
             throw new Error('メディアを収集中はZIP保存できません。収集を停止するか完了まで待ってください');
+          }
+          // popupが古い取得応答や選択情報を持っていても、確定済み保存先を戻さない。
+          if (Object.prototype.hasOwnProperty.call(message, 'expectedSaveDirectoryKey')) {
+            const currentDirectoryKey = state.archive?.saveDirectoryKey || state.preferredSaveDirectoryKey || null;
+            if ((message.expectedSaveDirectoryKey || null) !== currentDirectoryKey) {
+              throw new Error('保存先が変更されています。画面を更新してからZIP保存を再開してください');
+            }
           }
           if (state.deltaMode && state.deltaVerified !== true && state.pauseReason === 'delta_boundary_missing') {
             throw new Error('前回の保存済み投稿との境界を確認できないため、この候補はZIP保存できません。前回の状態へ戻してください');
@@ -1983,6 +2063,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const startResult = await chrome.runtime.sendMessage({
             target: 'offscreen',
             type: 'SMZ_OFFSCREEN_START_ARCHIVE',
+            traceId:message.traceId,
             platform,
             handle,
             jobId: state.archive.jobId,
@@ -2214,7 +2295,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (sender.url !== chrome.runtime.getURL('options/options.html')) throw new Error('設定画面から実行してください');
         if (fullResetInProgress) throw new Error('初期化処理が進行中です');
         fullResetInProgress = true;
+        directoryTraceGeneration++;
+        let traceResetCleared = false;
         try {
+          await globalThis.SMZDirectoryTraceStore?.suspendForReset();
           const all = await chrome.storage.local.get(null);
           const processing = Object.entries(all).some(([key, value]) => key.startsWith(COLLECTION_PREFIX) &&
             (['collecting', 'rate_limited', 'awaiting_confirmation'].includes(value?.status) ||
@@ -2234,11 +2318,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // OSのZIP/JSON、ブラウザのダウンロード履歴には一切触れない。
           await chrome.alarms.clearAll();
           await chrome.storage.local.clear();
+          traceResetCleared = true;
+          directoryTraceTabs.clear();
           pendingDownloadNames.clear();
           collectionQueues.clear();
           await restoreToolbarState();
           sendResponse({ ok: true });
         } finally {
+          await globalThis.SMZDirectoryTraceStore?.resumeAfterReset(traceResetCleared);
+          if (traceResetCleared) {
+            globalThis.SMZDirectoryTrace?.renewContext();
+            // 初期化前から存在する不可視ページの診断世代も更新する。保存処理は変更しない。
+            try { await chrome.runtime.sendMessage({target:'offscreen',type:'SMZ_OFFSCREEN_TRACE_RENEW'}); } catch {}
+          }
           fullResetInProgress = false;
         }
         break;
@@ -2305,3 +2397,11 @@ chrome.windows.onFocusChanged.addListener(() => {
 // 再取得が起きても重複排除でき、未保存ページを飛ばさない。
 apiRecoveryPromise = recoverApiCollections().catch(() => 0);
 void apiRecoveryPromise.finally(() => restoreToolbarState().catch(() => {}));
+
+// 選択タブからの送信を観測したものだけ、ブラウザ側のタブ閉鎖も補助記録する。
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  const selection = directoryTraceTabs.get(tabId);
+  if (!selection) return;
+  directoryTraceTabs.delete(tabId);
+  globalThis.SMZDirectoryTrace?.emit('selection.tab.removed', {...selection,tabId});
+});

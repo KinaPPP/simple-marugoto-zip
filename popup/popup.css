@@ -98,3 +98,11 @@ input[type="checkbox"], input[type="radio"] { accent-color:var(--blue); vertical
 
 .status-panel.archive-error .status-detail { color:#991b1b; font-weight:650; }
 .status-detail.status-feedback-error { color:#991b1b; font-weight:650; }
+
+/* 操作結果と保存先を各1行に分け、同じ27px内で[変更]を維持する。 */
+.status-detail.has-save-directory { display:block; }
+.status-summary { display:block; height:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.save-dir-line { display:flex; align-items:baseline; gap:4px; height:13.5px; min-width:0; }
+.save-dir-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.save-dir-line .save-dir-change { flex:0 0 auto; }
+.status-summary.status-feedback-error { color:#991b1b; font-weight:650; }

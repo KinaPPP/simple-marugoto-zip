@@ -11,7 +11,7 @@ const manifest = JSON.parse(read('manifest.json'));
 const popup = read('popup/popup.html');
 const options = read('options/options.html');
 const popupCode = read('popup/popup.js');
-assert.equal(manifest.version, '1.3.2');
+assert.equal(manifest.version, '1.3.13');
 assert.match(popup, /name="collectionMode"[^>]*value="manual" checked/);
 assert.doesNotMatch(popup, /name="collectionMode"[^>]*value="auto" checked/);
 assert.doesNotMatch(popup, /name="split"[^>]*value="10files"/);
@@ -26,7 +26,7 @@ vm.runInContext(read('backup/schema.js'), backupVm);
 assert.equal(backupVm.SMZBackup.safeSettings(null).collectionMode, 'manual');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'auto'}).collectionMode,'auto');
 assert.equal(backupVm.SMZBackup.safeSettings({collectionMode:'manual'}).collectionMode,'manual');
-console.log('PASS release UI: v1.3.2, new user manual, existing auto retained, no debug/10-file choices');
+console.log('PASS release UI: v1.3.13, new user manual, existing auto retained, no debug/10-file choices');
 
 async function splitTest(total, fileBytes, scaledMB, expectedIndexes) {
   const items = Array.from({length:total},(_,i)=>({
@@ -141,5 +141,5 @@ async function legacyTest() {
   console.log('PASS auto 300-MB boundary (scaled bytes): second file split, per-ZIP checkpoints');
   await legacyTest();
   console.log('PASS migration: paused v0.0.23 10-file job resumes, completed job uses new auto');
-  console.log('PASS v1.3.2 offline release suite');
+  console.log('PASS v1.3.13 offline release suite');
 })().catch(e=>{console.error(e);process.exitCode=1});

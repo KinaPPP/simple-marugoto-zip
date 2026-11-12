@@ -55,6 +55,9 @@ let manualFinishFeedback = '';
 let noticeUntil = 0;
 let statusFeedback = null;
 let archiveStopPending = false;
+let archiveStartPending = false;
+let collectionViewRevision = 0;
+let refreshRequestId = 0;
 
 function getCurrentSettings() {
   return {
@@ -175,47 +178,35 @@ function saveDirectoryKey() {
   return `archive-directory:${state?.collectionId || target?.handle || 'default'}`;
 }
 
+async function openSaveDirectoryTab(expectedKey = currentSaveDirectoryInfo()?.key || null) {
+  const params = new URLSearchParams({platform:target.platform, handle:target.handle, expectedKey:expectedKey || ''});
+  await chrome.tabs.create({url:chrome.runtime.getURL('archive/directory.html') + '?' + params});
+}
+
 async function prepareSaveDestination() {
   const fs = globalThis.SMZFileSystem;
   if (!fs || !('showDirectoryPicker' in window)) {
-    return { saveMode: 'downloads', saveDirectoryKey: null, saveDirectoryName: null };
+    return { saveMode:'downloads', saveDirectoryKey:null, saveDirectoryName:null };
   }
-
+  globalThis.SMZDirectoryTrace?.emit('popup.destination.prepare', globalThis.SMZDirectoryTrace.snapshot(state));
   const existingKey = state?.archive?.saveDirectoryKey || state?.preferredSaveDirectoryKey || null;
   const mustRepick = state?.archive?.pauseReason === 'save_permission';
-
-  // 既に同じ収集作業で選択済みなら、ZIP保存ボタンというユーザー操作中に
-  // 書き込み権限を確認し、必要ならここで再許可を求める。
-  // offscreen側では分割ZIPごとに権限プロンプトを発生させない。
   if (existingKey && !mustRepick) {
     try {
-      const handle = await fs.ensureWritableDirectory(existingKey, true);
-      return {
-        saveMode: 'directory',
-        saveDirectoryKey: existingKey,
-        saveDirectoryName: handle?.name || state?.archive?.saveDirectoryName || state?.preferredSaveDirectoryName || null
-      };
+      // 許可の判定は選択タブと実書き込み側へ任せる。
+      // 別コンテキストのqueryPermissionだけを理由に再選択を繰り返さない。
+      const handle = await fs.getHandle(existingKey);
+      if (handle) {
+        globalThis.SMZDirectoryTrace?.emit('popup.destination.ready', {directoryKey:existingKey,directoryName:handle.name});
+        return {saveMode:'directory', saveDirectoryKey:existingKey, saveDirectoryName:handle.name};
+      }
     } catch (error) {
-      if (!['SAVE_PERMISSION_REQUIRED', 'SAVE_DIRECTORY_MISSING'].includes(error?.code)) throw error;
-      // 権限を復旧できない場合のみ、下のフォルダ選択へフォールバック。
+      if (!['SAVE_PERMISSION_REQUIRED','SAVE_DIRECTORY_MISSING'].includes(error?.code)) throw error;
     }
   }
-
-  const key = existingKey || saveDirectoryKey();
-  try {
-    // 初回だけユーザー操作の直後にフォルダを選択。以後の分割ZIPは同じフォルダへ自動保存する。
-    const handle = await fs.pickDirectory(key);
-    return {
-      saveMode: 'directory',
-      saveDirectoryKey: key,
-      saveDirectoryName: handle?.name || null
-    };
-  } catch (error) {
-    if (error?.name === 'AbortError') return { cancelled: true };
-    // File System Access APIが使えない環境では、従来のChromeダウンロードへフォールバック。
-    console.warn('[Simple Marugoto ZIP] directory picker fallback:', error);
-    return { saveMode: 'downloads', saveDirectoryKey: null, saveDirectoryName: null, fallback: true };
-  }
+  globalThis.SMZDirectoryTrace?.emit('popup.destination.reselect', {directoryKey:existingKey,pauseReason:state?.archive?.pauseReason||null});
+  await openSaveDirectoryTab(existingKey);
+  return {needsDirectorySelection:true};
 }
 
 
@@ -251,8 +242,11 @@ function applyStatusFeedback() {
   const feedback = currentStatusFeedback();
   els.statusDetail.classList.remove('status-feedback-error');
   if (!feedback) return false;
-  els.statusDetail.textContent = feedback.message;
-  els.statusDetail.classList.toggle('status-feedback-error', feedback.error);
+  // 保存先行と[変更]は残し、説明行だけ操作結果へ置き換える。
+  const summary = els.statusDetail.querySelector('.status-summary') || els.statusDetail;
+  summary.textContent = feedback.message;
+  summary.title = feedback.message;
+  summary.classList.toggle('status-feedback-error', feedback.error);
   return true;
 }
 
@@ -284,29 +278,40 @@ function currentSaveDirectoryInfo() {
   return key ? { key, name } : null;
 }
 
+let directoryChangePending = false;
+
 function canChangeSaveDirectory() {
   const info = currentSaveDirectoryInfo();
   const collectionAllowsChange = !!state && state.status !== 'collecting' && state.status !== 'awaiting_confirmation';
-  return !!(target && info?.key && collectionAllowsChange && !archiveIsRunning() && !archiveStopPending &&
+  return !!(target && info?.key && collectionAllowsChange && !directoryChangePending && !archiveStartPending && !archiveIsRunning() && !archiveStopPending &&
     globalThis.SMZFileSystem && ('showDirectoryPicker' in window));
 }
 
 function renderSaveDirectoryChangeControl() {
   const info = currentSaveDirectoryInfo();
-  if (!info || !canChangeSaveDirectory()) return;
-
-  const detail = els.statusDetail.textContent || '';
-  if (!detail.includes('保存先:')) {
-    els.statusDetail.append(document.createTextNode(`${detail ? ' / ' : ''}保存先: ${info.name || '選択済み'}`));
-  }
-  els.statusDetail.append(document.createTextNode(' '));
+  if (!info || (!canChangeSaveDirectory() && !directoryChangePending && !archiveStartPending)) return;
+  const detail = (els.statusDetail.textContent || '').replace(/\s*\/\s*保存先:.*$/, '');
+  els.statusDetail.textContent = '';
+  els.statusDetail.classList.add('has-save-directory');
+  const summary = document.createElement('span');
+  summary.className = 'status-summary';
+  summary.textContent = detail;
+  summary.title = detail;
+  const line = document.createElement('span');
+  line.className = 'save-dir-line';
+  const name = document.createElement('span');
+  name.className = 'save-dir-name';
+  name.textContent = `保存先: ${info.name || '選択済み'}`;
+  name.title = name.textContent;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'save-dir-change';
   button.textContent = '[変更]';
   button.title = '次のZIPから保存先フォルダを変更';
+  button.disabled = !canChangeSaveDirectory();
   button.addEventListener('click', changeSaveDirectory);
-  els.statusDetail.append(button);
+  line.append(name, button);
+  els.statusDetail.append(summary, line);
 }
 
 function isDeltaBoundaryMissing(value = state) {
@@ -430,6 +435,7 @@ function render() {
   els.confirmActionBtn.classList.add('primary');
   els.statusPanel.classList.remove('archive-error');
   els.statusDetail.classList.remove('status-feedback-error');
+  els.statusDetail.classList.remove('has-save-directory');
   setNotice('');
 
   if (confirmationActive) {
@@ -650,18 +656,28 @@ function render() {
   const selectedNow = (els.includeImages.checked ? Number(state?.counts?.images || 0) : 0) + (els.includeVideos.checked ? Number(state?.counts?.videos || 0) : 0);
   const sameSelectionAsArchive = currentMediaKind() === (state?.archive?.mediaKind || mediaKindFromSelection(state?.archive?.selection));
   const nothingNewAfterComplete = state?.archive?.status === 'archive_complete' && sameSelectionAsArchive && selectedNow <= Number(state.archive.totalSelected || 0);
-  els.zipBtn.disabled = boundaryMissingDelta || !canZip || !selectedNow || archiveIsRunning() || nothingNewAfterComplete;
+  els.zipBtn.disabled = boundaryMissingDelta || directoryChangePending || archiveStartPending || !canZip || !selectedNow || archiveIsRunning() || nothingNewAfterComplete;
   els.stopZipBtn.disabled = !archiveIsRunning() || archiveStopPending;
 }
 
 async function refresh() {
+  if (directoryChangePending) return;
   if (!target) {
     state = null;
     render();
     return;
   }
-  const result = await chrome.runtime.sendMessage({ type:'SMZ_GET_COLLECTION', platform:target.platform, handle:target.handle });
+  const revision = collectionViewRevision;
+  const requestId = ++refreshRequestId;
+  const selectedTarget = {platform:target.platform, handle:target.handle};
+  const result = await chrome.runtime.sendMessage({ type:'SMZ_GET_COLLECTION', ...selectedTarget });
+  if (directoryChangePending || revision !== collectionViewRevision || requestId !== refreshRequestId ||
+      target?.platform !== selectedTarget.platform || target?.handle !== selectedTarget.handle) {
+    globalThis.SMZDirectoryTrace?.emit('popup.state.discarded', globalThis.SMZDirectoryTrace.snapshot(result?.state));
+    return;
+  }
   state = result?.state || null;
+  globalThis.SMZDirectoryTrace?.changed('popup.state.loaded', selectedTarget.platform+':'+selectedTarget.handle, globalThis.SMZDirectoryTrace.snapshot(state));
   render();
 }
 
@@ -844,80 +860,79 @@ els.confirmActionBtn.addEventListener('click', async () => {
 
 async function changeSaveDirectory() {
   if (!canChangeSaveDirectory()) return;
-  const fs = globalThis.SMZFileSystem;
-  const directory = currentSaveDirectoryInfo();
-  if (!fs || !directory?.key) return;
-
-  let previousHandle = null;
-  let replacedHandle = false;
+  directoryChangePending = true;
+  collectionViewRevision++;
   try {
-    previousHandle = await fs.getHandle(directory.key);
-    const picked = await fs.pickDirectory(directory.key);
-    replacedHandle = true;
-    const name = picked?.name || directory.name || '選択したフォルダ';
-    const result = await chrome.runtime.sendMessage({
-      type:'SMZ_CHANGE_SAVE_DIRECTORY',
-      platform:target.platform,
-      handle:target.handle,
-      saveDirectoryKey:directory.key,
-      saveDirectoryName:name
-    });
-    if (!result?.ok) throw new Error(result?.error || '保存先フォルダを変更できませんでした');
-    state = result.state || state;
-    setStatusFeedback(`保存先を「${name}」に変更しました。次のZIPから使用します。`);
-    await refresh();
+    await openSaveDirectoryTab();
   } catch (error) {
-    if (error?.name === 'AbortError') {
-      setStatusFeedback('保存先フォルダの変更をキャンセルしました。');
-      render();
-      return;
-    }
-    if (replacedHandle) {
-      try {
-        if (previousHandle) await fs.setHandle(directory.key, previousHandle);
-        else await fs.removeHandle(directory.key);
-      } catch {}
-    }
-    setStatusFeedback(error?.message || '保存先フォルダを変更できませんでした', true);
+    setStatusFeedback(error?.message || '保存先変更の画面を開けませんでした', true);
+  } finally {
+    directoryChangePending = false;
     render();
   }
 }
 
 async function startArchive() {
+  if (directoryChangePending || archiveStartPending) return;
+  archiveStartPending = true;
+  const traceId = globalThis.SMZDirectoryTrace?.id();
+  globalThis.SMZDirectoryTrace?.setScope({traceId,platform:target?.platform,account:target?.handle});
+  globalThis.SMZDirectoryTrace?.emit('popup.zip.click', globalThis.SMZDirectoryTrace.snapshot(state));
+  collectionViewRevision++;
+  setStatusFeedback('');
+  render();
+  try {
   const split = document.querySelector('input[name="split"]:checked')?.value || 'auto';
-  const limitValue = document.querySelector('input[name="downloadLimit"]:checked')?.value || '5';
-  const runLimit = limitValue === '5' ? 5 : null;
+    const limitValue = document.querySelector('input[name="downloadLimit"]:checked')?.value || '5';
+    const runLimit = limitValue === '5' ? 5 : null;
 
-  const selectedCount = (els.includeImages.checked ? Number(state?.counts?.images || 0) : 0)
-    + (els.includeVideos.checked ? Number(state?.counts?.videos || 0) : 0);
-  if (!selectedCount) {
-    render(); // 権限や保存先を要求する前に、画面内の案内だけ更新する。
-    return;
-  }
-  if (target?.platform === 'bluesky' && !await bskyPermissionReady()) return;
-  if (target?.platform === 'threads' && !await threadsMediaPermissionReady()) return;
-  const destination = await prepareSaveDestination();
-  if (destination.cancelled) {
-    setNotice('保存先フォルダの選択をキャンセルしました。');
-    return;
-  }
-  if (destination.fallback) {
-    setNotice('フォルダ直接保存を利用できないため、Chrome標準のダウンロード方式で保存します。');
-  }
+    const selectedCount = (els.includeImages.checked ? Number(state?.counts?.images || 0) : 0)
+      + (els.includeVideos.checked ? Number(state?.counts?.videos || 0) : 0);
+    if (!selectedCount) {
+      render(); // 権限や保存先を要求する前に、画面内の案内だけ更新する。
+      return;
+    }
+    if (target?.platform === 'bluesky' && !await bskyPermissionReady()) return;
+    if (target?.platform === 'threads' && !await threadsMediaPermissionReady()) return;
+    const expectedSaveDirectoryKey = currentSaveDirectoryInfo()?.key || null;
+    const destination = await prepareSaveDestination();
+    if (destination.needsDirectorySelection) {
+      setStatusFeedback('別タブで保存先を選んだ後、この画面を開き直してZIP保存を開始してください。「常に許可」を選んでいない場合は、連続するZIP保存がすべて終わるまで選択タブを閉じないでください。');
+      return;
+    }
+    if (destination.cancelled) {
+      setNotice('保存先フォルダの選択をキャンセルしました。');
+      return;
+    }
+    if (destination.fallback) {
+      setNotice('フォルダ直接保存を利用できないため、Chrome標準のダウンロード方式で保存します。');
+    }
 
-  const result = await chrome.runtime.sendMessage({
-    type:'SMZ_START_ARCHIVE',
-    platform:target.platform,
-    handle:target.handle,
-    selection:{ images:els.includeImages.checked, videos:els.includeVideos.checked },
-    splitMode:split,
-    runLimit,
-    saveMode: destination.saveMode,
-    saveDirectoryKey: destination.saveDirectoryKey,
-    saveDirectoryName: destination.saveDirectoryName
-  });
-  if (!result?.ok) setNotice(result?.error || 'ZIP作成を開始できませんでした', true);
-  await refresh();
+    const result = await chrome.runtime.sendMessage({
+      type:'SMZ_START_ARCHIVE',
+      traceId,
+      expectedSaveDirectoryKey,
+      platform:target.platform,
+      handle:target.handle,
+      selection:{ images:els.includeImages.checked, videos:els.includeVideos.checked },
+      splitMode:split,
+      runLimit,
+      saveMode: destination.saveMode,
+      saveDirectoryKey: destination.saveDirectoryKey,
+      saveDirectoryName: destination.saveDirectoryName
+    });
+    globalThis.SMZDirectoryTrace?.emit('popup.zip.startResult', {ok:result?.ok===true,errorMessage:result?.error||null,...globalThis.SMZDirectoryTrace.snapshot(result?.state)});
+    collectionViewRevision++;
+    if (!result?.ok) setNotice(result?.error || 'ZIP作成を開始できませんでした', true);
+    await refresh();
+  } catch (error) {
+    setStatusFeedback(error?.message || 'ZIP保存を開始できませんでした', true);
+  } finally {
+    globalThis.SMZDirectoryTrace?.emit('popup.zip.operationFinished', globalThis.SMZDirectoryTrace.snapshot(state));
+    globalThis.SMZDirectoryTrace?.setScope({});
+    archiveStartPending = false;
+    render();
+  }
 }
 
 els.zipBtn.addEventListener('click', startArchive);
@@ -968,6 +983,7 @@ document.querySelectorAll('input[name="split"], input[name="downloadLimit"]').fo
 (async () => {
   [activeTab] = await chrome.tabs.query({ active:true, currentWindow:true });
   target = parseTarget(activeTab?.url || '');
+  globalThis.SMZDirectoryTrace?.emit('popup.open', {platform:target?.platform||null,account:target?.handle||null});
   await loadSettings();
   if (['bluesky','threads'].includes(target?.platform)) {
     const result = await chrome.runtime.sendMessage({ type:target.platform === 'threads' ? 'SMZ_THREADS_GET_PROFILE' : 'SMZ_BSKY_GET_PROFILE',actor:target.handle });
