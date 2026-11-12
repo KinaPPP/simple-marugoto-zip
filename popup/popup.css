@@ -79,8 +79,10 @@ body {
 .compact-panel { height:65px; overflow:hidden; }
 .compact-panel .section-title { margin-bottom:5px; }
 .checks, .radios { display:flex; gap:14px; align-items:center; flex-wrap:nowrap; min-width:0; }
-.split-panel { height:78px; }
-.split-radios { gap:4px 12px; flex-wrap:wrap; line-height:1.15; }
+.split-panel, .debug-panel { height:56px; }
+.compact-controls { min-height:20px; }
+.compact-panel .compact-controls .section-title { margin-bottom:0; flex:0 0 auto; }
+.split-radios { gap:10px; flex-wrap:nowrap; line-height:1.15; }
 .checks { margin-left:auto; }
 .checks label, .radios label { font-size:11px; font-weight:650; color:var(--sub); cursor:pointer; white-space:nowrap; }
 input[type="checkbox"], input[type="radio"] { accent-color:var(--blue); vertical-align:-1px; margin:0 3px 0 0; }

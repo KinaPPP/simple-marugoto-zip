@@ -72,26 +72,29 @@
   </section>
 
   <section class="panel compact-panel split-panel">
-    <div class="section-title">ZIP分割</div>
-    <div class="radios split-radios">
-      <label><input type="radio" name="split" value="auto" checked> 自動</label>
-      <label><input type="radio" name="split" value="500mb"> 500 MB</label>
-      <label><input type="radio" name="split" value="1gb"> 1 GB</label>
-      <label><input type="radio" name="split" value="500files"> 500ファイル</label>
+    <div class="setting-line compact-controls">
+      <span class="section-title inline-title">ZIP分割</span>
+      <div class="radios split-radios">
+        <label><input type="radio" name="split" value="auto" checked> 自動</label>
+        <label><input type="radio" name="split" value="500mb"> 500 MB</label>
+        <label><input type="radio" name="split" value="1gb"> 1 GB</label>
+        <label><input type="radio" name="split" value="500files"> 500ファイル</label>
+      </div>
     </div>
     <div class="hint one-line">自動は300 MBまたは300ファイルの先に達した条件で分割。</div>
   </section>
 
   <section class="panel compact-panel debug-panel">
-    <div class="section-title">ダウンロードファイル数</div>
-    <div class="radios debug-radios">
-      <label><input type="radio" name="downloadLimit" value="5" checked> 5ファイル <span class="debug-badge">動作確認</span></label>
-      <label><input type="radio" name="downloadLimit" value="all"> 無制限</label>
+    <div class="setting-line compact-controls">
+      <span class="section-title inline-title">ダウンロードファイル数</span>
+      <div class="radios debug-radios">
+        <label><input type="radio" name="downloadLimit" value="5" checked> 5ファイル <span class="debug-badge">動作確認</span></label>
+        <label><input type="radio" name="downloadLimit" value="all"> 無制限</label>
+      </div>
     </div>
     <div class="hint one-line">初回の動作確認向け。選択した設定は次回も記憶します。</div>
   </section>
 
-  <p class="hint">保存先の選択・変更は別タブで行います。「常に許可」を選んでいない場合は、連続するZIP保存がすべて終わるまで選択タブを閉じないでください。</p>
   <div class="zip-row">
     <button id="zipBtn" class="btn btn-green" disabled>ZIPで保存</button>
     <button id="stopZipBtn" class="btn btn-stop" disabled>中止</button>
