@@ -36,6 +36,9 @@
   let uiSettings = { xSplitMedia: true, xRevertProfileTabs: false };
   let splitLayout = null; // Xの実効フラグ。Control Panelによる旧UI化も検出する。
   let successfulPageResponses = 0;
+  let startGeneration = 0;
+  const writingBatches = new Set();
+  let lastDomPosts = '';
   const uiSettingsReady = chrome.storage?.local?.get ? chrome.storage.local.get(UI_SETTINGS_KEY).then((storage) => {
     const source = storage?.[UI_SETTINGS_KEY] || {};
     uiSettings = { xSplitMedia: source.xSplitMedia !== false,
@@ -96,16 +99,25 @@
     try {
       if (handle) sessionStorage.setItem('smz_x_collect_handle', handle);
       else sessionStorage.removeItem('smz_x_collect_handle');
+      if (handle && activeCollectionId) sessionStorage.setItem('smz_x_collect_id', activeCollectionId);
+      else sessionStorage.removeItem('smz_x_collect_id');
     } catch {}
   }
 
-  function setHook(enabled, handle = activeHandle) {
+  function setHook(enabled, handle = activeHandle, { deliveryReady = true, preservePending = false } = {}) {
     window.postMessage({
       source: POST_SOURCE,
       type: 'SMZ_X_CONTROL',
       enabled,
-      handle: handle || ''
+      handle: handle || '',
+      collectionId: activeCollectionId || '',
+      deliveryReady,
+      preservePending
     }, '*');
+    if(enabled && activeHandle && activeCollectionId) {
+      try {chrome.runtime.sendMessage({type:'SMZ_X_CAPTURE_DIAGNOSTIC',handle:activeHandle,collectionId:activeCollectionId,
+        diagnostic:{phase:'content_ready',version:'1.3.16'}})?.catch?.(()=>{});} catch {}
+    }
   }
 
   function clearTimer() {
@@ -152,16 +164,35 @@
     networkSeenAfterLastScroll = false;
     lastReportedPhase = null;
     successfulPageResponses = 0;
+    lastDomPosts = '';
+  }
+
+  async function reportVisiblePosts() {
+    if (!running || typeof document.querySelectorAll !== 'function') return;
+    const posts = new Set();
+    for (const link of document.querySelectorAll('a[href*="/status/"]')) {
+      try {
+        const url = new URL(link.getAttribute('href'), location.href || 'https://x.com');
+        const match = /^\/([a-z0-9_]+)\/status\/(\d+)(?:\/(?:photo|video)\/\d+)?\/?$/i.exec(url.pathname);
+        if (['x.com','twitter.com'].includes(url.hostname) && match?.[1].toLowerCase() === activeHandle.toLowerCase()) posts.add(match[2]);
+        if (posts.size >= 200) break;
+      } catch {}
+    }
+    const fingerprint = [...posts].join(',');
+    if (!fingerprint || fingerprint === lastDomPosts) return;
+    lastDomPosts = fingerprint;
+    await chrome.runtime.sendMessage({type:'SMZ_X_DOM_POSTS',handle:activeHandle,collectionId:activeCollectionId,postIds:[...posts]}).catch(()=>{});
   }
 
   function stopLocal({ clearMarker = true } = {}) {
+    startGeneration++;
     running = false;
     clearTimer();
     clearDeltaTimer();
     inflightRequests.clear();
     awaitingResponseAfterScroll = false;
     networkSeenAfterLastScroll = false;
-    setHook(false);
+    setHook(false, activeHandle, { preservePending: !clearMarker });
     lastReportedPhase = null;
     if (clearMarker) setSessionMarker(null);
   }
@@ -282,6 +313,8 @@
 
   async function tick() {
     if (!running || collectionMode === 'manual') return;
+    await reportVisiblePosts();
+    if (!running || collectionMode === 'manual') return;
     // 新UIの動画側だけで差分境界が見えても、画像側に未収集の新着が残る。
     // 新UIの差分は両ページの末尾まで確認し、誤った早期完了を避ける。
     if (deltaBaselinePostId && deltaBoundaryReached &&
@@ -363,7 +396,9 @@
   }
 
   async function startCollecting(handle, { resetPosition = false, skipLargeWarning = false, mode = 'auto', baselinePostId = null } = {}) {
+    const generation = ++startGeneration;
     if (uiSettingsReady) await uiSettingsReady;
+    if (generation !== startGeneration) return;
     activeHandle = handle;
     collectionMode = mode === 'manual' ? 'manual' : 'auto';
     deltaBaselinePostId = /^\d+$/.test(String(baselinePostId || '')) ? String(baselinePostId) : null;
@@ -375,16 +410,20 @@
     running = true;
     resetPacingState();
     clearTimer();
-    setHook(true, handle);
+    // 確認が終わるまではMAIN側に蓄積し、登録先がcollectingになってから送る。
+    setHook(true, handle, { deliveryReady: false });
     if (resetPosition && collectionMode === 'auto') window.scrollTo({ top: 0, behavior: 'auto' });
 
     if (!skipLargeWarning) {
       const proceed = await confirmLargeCollectionIfNeeded(handle);
+      if (generation !== startGeneration) return;
       if (!proceed) {
         stopLocal({ clearMarker: false });
         return;
       }
     }
+
+    setHook(true, handle);
 
     // 手動モードは受動的な通信監視だけ。ユーザーが普通にスクロールし、
     // 終わったらポップアップから明示的に「収集を完了」を押す。
@@ -453,6 +492,38 @@
     }
     if (!activeHandle) return;
 
+    if(event.data.type==='SMZ_X_CAPTURE_DIAGNOSTIC') {
+      if(!running)return;
+      try {
+        const raw=event.data.diagnostic;if(!raw||typeof raw!=='object')return;
+        const diagnostic={};
+        for(const key of ['phase','version','operation','reason','shapeKeys','targetPostIds','targetAssetIds','targetReasons']) {
+          if(typeof raw[key]==='string'&&raw[key].length<=500)diagnostic[key]=raw[key];
+        }
+        for(const key of ['objectsSeen','tweetCandidates','noLegacyCount','noMediaCount','authorRejectedCount','duplicateCount','extractedCount','targetPostCount','targetAssetCount','httpStatus']) {
+          if(Number.isSafeInteger(raw[key])&&raw[key]>=0&&raw[key]<=200000)diagnostic[key]=raw[key];
+        }
+        await chrome.runtime.sendMessage({type:'SMZ_X_CAPTURE_DIAGNOSTIC',handle:activeHandle,collectionId:activeCollectionId,diagnostic});
+      }catch{}
+      return;
+    }
+
+    if (event.data.type === 'SMZ_X_MEDIA_DIAGNOSTIC') {
+      if (!running) return;
+      try {
+        const raw=event.data.diagnostic;if(!raw||typeof raw!=='object')return;
+        const diagnostic={};
+        for(const key of ['postId','phase','reason','operation']) {
+          if(raw[key]===null || (typeof raw[key]==='string' && raw[key].length<=30))diagnostic[key]=raw[key];
+        }
+        for(const key of ['receivedCount','firstMediaCount','extractedCount','imageCount','videoCount','ignoredCount']) {
+          if(Number.isSafeInteger(raw[key])&&raw[key]>=0&&raw[key]<=1000)diagnostic[key]=raw[key];
+        }
+        await chrome.runtime.sendMessage({type:'SMZ_X_MEDIA_DIAGNOSTIC',handle:activeHandle,collectionId:activeCollectionId,diagnostic});
+      } catch {}
+      return;
+    }
+
     if (event.data.type === 'SMZ_X_REQUEST_START') {
       noteRequestStart(event.data.requestId);
       return;
@@ -467,19 +538,31 @@
 
     if (event.data.type === 'SMZ_X_MEDIA_BATCH') {
       if (!running) return;
+      if (event.data.collectionId && event.data.collectionId !== activeCollectionId) return;
+      if (event.data.handle && event.data.handle !== activeHandle.toLowerCase()) return;
       const items = Array.isArray(event.data.items) ? event.data.items : [];
       if (!items.length) return;
+      const batchId = event.data.batchId;
+      if (batchId && writingBatches.has(batchId)) return;
+      if (batchId) writingBatches.add(batchId);
+      const handle = activeHandle, collectionId = activeCollectionId;
       successfulPageResponses = Math.max(1, successfulPageResponses);
       pendingMediaWrites++;
       try {
         const result = await chrome.runtime.sendMessage({
           type: 'SMZ_ADD_MEDIA',
           platform: 'x',
-          handle: activeHandle,
-          collectionId: activeCollectionId,
+          handle,
+          collectionId,
           items,
           requestUrl: event.data.requestUrl || ''
         });
+        if (!running || activeHandle !== handle || activeCollectionId !== collectionId) return;
+        if (result?.ok && result.accepted === true && batchId) {
+          window.postMessage({source:POST_SOURCE,type:'SMZ_X_BATCH_ACK',batchId,collectionId}, '*');
+        } else if (batchId) {
+          throw new Error('収集データの登録を確認できません。再開して再取得してください。');
+        }
         if (result?.ok && result.addedCount > 0) {
           lastNewMediaAt = Date.now();
           reportPhase(null);
@@ -488,10 +571,26 @@
           deltaBoundaryReached = true;
           reportPhase('final_check');
         }
-      } catch {} finally {
+      } catch (error) {
+        if (running && activeHandle === handle && activeCollectionId === collectionId) {
+          stopLocal({ clearMarker: false });
+          await chrome.runtime.sendMessage({type:'SMZ_COLLECTION_ERROR',platform:'x',handle,collectionId,
+            reloadRequired:true,error:'収集データの登録を確認できません。収集を再開してください。'}).catch(()=>{});
+        }
+      } finally {
+        if (batchId) writingBatches.delete(batchId);
         pendingMediaWrites = Math.max(0, pendingMediaWrites - 1);
         if (deltaBoundaryReached && (collectionMode === 'manual' ? splitLayout !== true : (!uiSettings.xSplitMedia || splitLayout === false))) scheduleDeltaCompletion();
       }
+      return;
+    }
+
+    if (event.data.type === 'SMZ_X_CAPTURE_ERROR') {
+      if (!running || event.data.collectionId !== activeCollectionId) return;
+      const handle=activeHandle, collectionId=activeCollectionId;
+      stopLocal({ clearMarker: false });
+      await chrome.runtime.sendMessage({type:'SMZ_COLLECTION_ERROR',platform:'x',handle,collectionId,
+        reloadRequired:true,error:'収集データの登録待ちが上限に達しました。収集を再開して不足分を確認してください。'}).catch(()=>{});
       return;
     }
 
@@ -551,6 +650,7 @@
           sendResponse({ ok: false, error: '対象の手動収集は現在実行中ではありません' });
           return;
         }
+        await reportVisiblePosts();
         // 読み込んだレスポンスを保存し終えるまで待つ。通信が継続中なら
         // 強制的に打ち切らず、ユーザーへ数秒後の再操作をお願いする。
         const deadline = Date.now() + 8000;
@@ -602,11 +702,13 @@
   (async () => {
     const target = parseTarget();
     if (!target?.isMediaPage) return;
+    const generation = startGeneration;
     const result = await chrome.runtime.sendMessage({
       type: 'SMZ_GET_COLLECTION',
       platform: 'x',
       handle: target.handle
     });
+    if (generation !== startGeneration) return;
     if (result?.state?.status === 'collecting' && result.isCollectionTab !== false) {
       activeCollectionId = result.state.collectionId || null;
       activeHandle = target.handle;
@@ -615,7 +717,7 @@
         resetPosition: true,
         skipLargeWarning: continuePhotos,
         mode: result.state.collectionMode,
-        baselinePostId: result.state.deltaBaselinePostId
+        baselinePostId: result.state.repairMode ? null : result.state.deltaBaselinePostId
       });
     }
   })().catch(() => {});

@@ -29,6 +29,7 @@ const els = {
   resumeRow: document.getElementById('resumeRow'),
   restartBtn: document.getElementById('restartBtn'),
   newOnlyBtn: document.getElementById('newOnlyBtn'),
+  rescanBtn: document.getElementById('rescanBtn'),
   confirmRow: document.getElementById('confirmRow'),
   confirmCancelBtn: document.getElementById('confirmCancelBtn'),
   confirmActionBtn: document.getElementById('confirmActionBtn'),
@@ -416,19 +417,21 @@ function render() {
   const boundaryMissingDelta = isDeltaBoundaryMissing(state);
   const confirmationActive = largeConfirmation || resetConfirmation;
   const manualCollecting = state?.status === 'collecting' && state?.collectionMode === 'manual';
-  const deltaCollecting = state?.status === 'collecting' && state?.deltaMode === true;
+  const deltaCollecting = state?.status === 'collecting' && state?.deltaMode === true && !state.repairMode;
   const modeLocked = archivingNow || confirmationActive || ['collecting', 'rate_limited'].includes(state?.status);
   const shownMode = modeLocked ? (state?.collectionMode || preferredCollectionMode) : preferredCollectionMode;
   document.querySelectorAll('input[name="collectionMode"]').forEach((input) => {
     input.checked = input.value === shownMode;
     input.disabled = modeLocked;
   });
-  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || boundaryMissingDelta || (isApi && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || !state?.counts?.total));
+  els.collectBtn.disabled = archivingNow || confirmationActive || !supported || boundaryMissingDelta || (isApi && (!target.apiReady || (state?.resumeAt > Date.now() && state?.pauseReason === 'rate_limit'))) || collectionComplete || state?.status === 'rate_limited' || manualFinishBusy || (state?.status === 'collecting' && (!manualCollecting || deltaCollecting || (!state?.counts?.total && !state?.repairMode)));
   els.stopCollectBtn.disabled = archivingNow || confirmationActive || !(state?.status === 'collecting' || state?.status === 'rate_limited');
   setArchiveUiLock(archivingNow);
   els.resumeRow.classList.add('hidden');
   els.newOnlyBtn.classList.add('hidden');
   els.newOnlyBtn.disabled = true;
+  els.rescanBtn.classList.add('hidden');
+  els.rescanBtn.disabled = true;
   els.restartBtn.textContent = canReturnToPreviousDelta(state) ? '前回に戻す' : '進捗をリセット';
   els.confirmRow.classList.add('hidden');
   els.confirmActionBtn.classList.remove('danger');
@@ -483,7 +486,7 @@ function render() {
     const cumulative = cumulativeCountsForState(state);
     const cumulativeLabel = state.deltaMode && cumulative ? ` / 累計 ${fmtCount(cumulative.total)}件` : '';
     const expected = Number(state.displayMediaCount || 0);
-    const detailBase = state.deltaMode
+    const detailBase = state.repairMode ? `追加 ${fmtCount(total)}件${cumulativeLabel} / 不足分を再確認中` : state.deltaMode
       ? `新規 ${fmtCount(total)}件${cumulativeLabel} / 前回の投稿まで確認中`
       : expected > 0 && !isApi
       ? `${fmtCount(total)}件検出 / X表示 約${fmtCount(expected)}件`
@@ -493,25 +496,25 @@ function render() {
     if (state.status === 'collecting') {
       if (isApi) {
         const service = isThreads ? 'Threads' : 'Bluesky';
-        els.statusTitle.textContent = state.deltaMode ? `${service}の新規分を確認中…` : `${service} APIから収集中…`;
+        els.statusTitle.textContent = state.repairMode ? `${service}の不足分を再収集中…` : state.deltaMode ? `${service}の新規分を確認中…` : `${service} APIから収集中…`;
         const scanned = Number(state.scannedPosts || 0);
         els.statusDetail.textContent = `${detailBase}${scanned ? ` / ${fmtCount(scanned)}投稿確認` : ''} / ${fmtCount(state.pagesFetched || 0)}ページ取得。画面を閉じても収集を続けます`;
         setProgress('indeterminate');
         els.collectBtn.textContent = 'メディアを収集中';
       } else if (manualCollecting) {
-        els.statusTitle.textContent = state.deltaMode ? '手動で新規分を確認中' : '手動スクロールで収集中';
-        els.statusDetail.textContent = manualFinishFeedback || (state.deltaMode
+        els.statusTitle.textContent = state.repairMode ? '手動で不足分を再収集中' : state.deltaMode ? '手動で新規分を確認中' : '手動スクロールで収集中';
+        els.statusDetail.textContent = manualFinishFeedback || (state.deltaMode && !state.repairMode
           ? `前回の投稿までスクロールすると自動終了 / 新規 ${fmtCount(total)}件。途中保存は「停止」`
           : `Xの /media を下へスクロール。終わったら青い「収集を完了」 / ${detailBase}`);
         setProgress('indeterminate');
-        els.collectBtn.textContent = state.deltaMode ? '新規分を収集中' : manualFinishBusy ? '読込終了を確認中…' : '収集を完了';
+        els.collectBtn.textContent = state.deltaMode && !state.repairMode ? '新規分を収集中' : manualFinishBusy ? '読込終了を確認中…' : '収集を完了';
       } else {
         els.statusTitle.textContent = state.collectionPhase === 'final_check'
           ? (state.deltaMode ? '前回位置の確認中…' : '収集の最終確認中…')
-          : (state.deltaMode ? '新規分をチェック中…' : '収集中…');
+          : (state.repairMode ? '不足分を再収集中…' : state.deltaMode ? '新規分をチェック中…' : '収集中…');
         els.statusDetail.textContent = state.collectionPhase === 'final_check'
           ? `追加のメディアと通信を確認中。終了後にZIP保存できます / ${detailBase}`
-          : state.deltaMode ? `前回の投稿位置に到達したら自動終了 / ${detailBase}` : `Xのメディアページを確認中 / ${detailBase}`;
+          : state.deltaMode && !state.repairMode ? `前回の投稿位置に到達したら自動終了 / ${detailBase}` : `Xのメディアページを確認中 / ${detailBase}`;
         setProgress('indeterminate');
         els.collectBtn.textContent = 'メディアを収集中';
       }
@@ -552,8 +555,8 @@ function render() {
       els.resumeRow.classList.remove('hidden');
       els.collectBtn.textContent = boundaryMissingDelta ? '境界を確認できません' : '収集を再開';
     } else if (state.status === 'complete' || state.status === 'archive_complete' || state.status === 'archive_paused' || state.status === 'archive_error') {
-      els.statusTitle.textContent = state.lastNewCheckResult === 0 ? '新規メディアはありません' :
-        state.archive?.status === 'archive_complete' ? 'ZIP保存完了' : state.deltaMode ? '新規分の収集完了' : '収集完了';
+      els.statusTitle.textContent = state.lastNewCheckResult === 0 ? (state.lastCheckWasRepair ? '追加のメディアはありません' : '新規メディアはありません') :
+        state.archive?.status === 'archive_complete' ? 'ZIP保存完了' : state.repairMode ? '不足分の収集完了' : state.deltaMode ? '新規分の収集完了' : '収集完了';
       els.statusDetail.textContent = state.lastNewCheckResult === 0
         ? `前回の収集・ZIP情報はそのままです / 最終確認 ${fmtTime(state.lastNewCheckAt)}`
         : state.deltaMode && cumulative
@@ -564,6 +567,8 @@ function render() {
       els.resumeRow.classList.remove('hidden');
       els.newOnlyBtn.classList.remove('hidden');
       els.newOnlyBtn.disabled = archivingNow || !canCheckNewMedia();
+      els.rescanBtn.classList.remove('hidden');
+      els.rescanBtn.disabled = archivingNow || !(Number(state.counts?.total || 0) === 0 || canCheckNewMedia());
       if (state.deltaMode && !canCheckNewMedia()) {
         els.newOnlyBtn.title = '次のチェック前に、今回の新規画像・動画をすべてZIP保存してください';
       } else {
@@ -740,23 +745,25 @@ async function beginCollection(restart) {
     type:'SMZ_START_COLLECTION',
     platform:'x', handle:target.handle, tabId:activeTab.id, restart,
     collectionMode: preferredCollectionMode,
-    forceReload: preferredCollectionMode !== 'manual' || state?.status !== 'paused'
+    forceReload: state?.captureReloadRequired === true || preferredCollectionMode !== 'manual' || state?.status !== 'paused'
   });
   if (!result?.ok) setNotice(result?.error || '収集を開始できませんでした', true);
   else state = result.state;
   render();
 }
 
-async function checkNewMedia() {
-  if (!target || !activeTab || !canCheckNewMedia()) return;
+async function checkNewMedia({ rescan = false } = {}) {
+  const canRepair = state?.status === 'complete' && !archiveIsRunning() && (Number(state.counts?.total || 0) === 0 || canCheckNewMedia());
+  if (!target || !activeTab || !(rescan ? canRepair : canCheckNewMedia())) return;
   setNotice('');
   els.newOnlyBtn.disabled = true;
+  els.rescanBtn.disabled = true;
   if (target.platform === 'bluesky' && !await bskyPermissionReady()) return;
   const result = await chrome.runtime.sendMessage(['bluesky','threads'].includes(target.platform) ? {
-    type:target.platform === 'threads' ? 'SMZ_THREADS_START_COLLECTION' : 'SMZ_BSKY_START_COLLECTION', handle:target.handle, newOnly:true
+    type:target.platform === 'threads' ? 'SMZ_THREADS_START_COLLECTION' : 'SMZ_BSKY_START_COLLECTION', handle:target.handle, newOnly:!rescan, rescan
   } : {
     type: 'SMZ_START_COLLECTION', platform: 'x', handle: target.handle,
-    tabId: activeTab.id, newOnly: true, collectionMode: preferredCollectionMode,
+    tabId: activeTab.id, newOnly: !rescan, rescan, collectionMode: preferredCollectionMode,
     forceReload: true
   });
   if (result?.ok) state = result.state;
@@ -770,6 +777,7 @@ async function checkNewMedia() {
 }
 
 els.newOnlyBtn.addEventListener('click', checkNewMedia);
+els.rescanBtn.addEventListener('click', () => checkNewMedia({ rescan: true }));
 
 els.optionsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
 els.collectBtn.addEventListener('click', async () => {

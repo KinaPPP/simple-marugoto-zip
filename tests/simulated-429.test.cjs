@@ -418,11 +418,11 @@ async function testMainHookEarlyBatch() {
     console }, { filename: 'providers/x/main-hook.js' });
   await window.fetch('https://x.com/i/api/graphql/test/UserMedia');
   await tick(); await tick();
-  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 1);
+  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 0);
   listeners.get('message')({ source: window, data: {
     source: 'simple-marugoto-zip', type: 'SMZ_X_CONTROL', enabled: true, handle: 'demo'
   } });
-  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 2,
+  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 1,
     'media loaded before the content bridge was ready must be replayed');
   listeners.get('message')({ source: window, data: {
     source: 'simple-marugoto-zip', type: 'SMZ_X_CONTROL', enabled: false, handle: 'demo'
@@ -430,9 +430,9 @@ async function testMainHookEarlyBatch() {
   listeners.get('message')({ source: window, data: {
     source: 'simple-marugoto-zip', type: 'SMZ_X_CONTROL', enabled: true, handle: 'demo'
   } });
-  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 2,
-    'already acknowledged early batches must not be replayed again');
-  console.log('PASS X hook: early /media responses survive content bootstrap and are replayed exactly once');
+  assert.equal(messages.filter((msg) => msg.type === 'SMZ_X_MEDIA_BATCH').length, 1,
+    'explicit stop clears pending data; a later job must not inherit it');
+  console.log('PASS X hook: early /media responses survive content bootstrap; explicit stop clears the old capture');
 }
 
 async function testFailedAutomaticResumeAcknowledgement() {

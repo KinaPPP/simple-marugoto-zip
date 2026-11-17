@@ -67,3 +67,30 @@ test('viewer receives log-clear failure instead of a false success',async()=>{
  const h=await harness();h.failStorage(true);
  assert.equal((await h.send({type:'SMZ_TRACE_CLEAR'})).ok,false);
 });
+
+test('X diagnostic endpoint accepts only the active source tab and strips page secrets',async()=>{
+ const h=await harness();const id='2121034947280753090';
+ await h.background.chrome.storage.local.set({smz_collection_x_demo:{platform:'x',handle:'demo',status:'collecting',collectionId:'x-job',collectionTabId:77,items:[],counts:{images:0,videos:0,total:0}}});
+ const msg={type:'SMZ_X_MEDIA_DIAGNOSTIC',handle:'demo',collectionId:'x-job',diagnostic:{postId:id,phase:'extracted',receivedCount:20,firstMediaCount:20,extractedCount:20,imageCount:20,videoCount:0,ignoredCount:0,token:'SECRET_TOKEN',url:'SECRET_URL'}};
+ assert.equal((await h.send(msg,h.base+'popup/popup.html',77)).ok,false);
+ assert.equal((await h.send(msg,'https://x.com/demo/media',78)).discarded,true);
+ assert.equal((await h.send({...msg,collectionId:'stale'},'https://x.com/demo/media',77)).discarded,true);
+ assert.equal((await h.send(msg,'https://x.com/other/media',77)).ok,false);
+ assert.equal((await h.send(msg,'https://x.com/demo/media',77)).ok,true);
+ const log=(await h.send({type:'SMZ_TRACE_GET'})).log;
+ const event=log.entries.find(e=>e.event==='x.media.response');assert.equal(event.fields.receivedCount,20);assert.equal(event.fields.postId,id);
+ assert(!JSON.stringify(log).includes('SECRET_'));
+});
+
+test('20 received items are persisted before diagnostics report collection and saved-key counts',async()=>{
+ const h=await harness(),id='2121034947280753090';
+ await h.background.chrome.storage.local.set({smz_collection_x_demo:{platform:'x',handle:'demo',status:'collecting',collectionId:'x-job',collectionTabId:77,items:[],counts:{images:0,videos:0,total:0}}});
+ const items=Array.from({length:20},(_,i)=>({key:`${id}_${i+1}`,postId:id,mediaIndex:i+1,type:'image',url:`https://pbs.twimg.com/media/PRIVATE_${i}.jpg`}));
+ const result=await h.send({type:'SMZ_ADD_MEDIA',handle:'demo',collectionId:'x-job',items},'https://x.com/demo/media',77);
+ assert.equal(result.addedCount,20);
+ await h.background.chrome.storage.local.set({smz_collection_x_demo:{...result.state,savedItemKeys:items.map(i=>i.key)}});
+ const exported=await h.send({type:'SMZ_TRACE_GET'});
+ assert.equal(exported.xMedia[0].posts[0].collectedCount,20);assert.equal(exported.xMedia[0].posts[0].savedCount,20);
+ assert.equal(exported.log.entries.find(e=>e.event==='x.media.persisted').fields.addedCount,20);
+ assert(!JSON.stringify(exported).includes('PRIVATE_'));
+});

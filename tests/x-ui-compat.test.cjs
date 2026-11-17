@@ -66,6 +66,10 @@ function createPage(shared, {photo=false, split=true}={}) {
   const store=new Map();
   const session={getItem(k){return store.get(k)||null;},setItem(k,v){store.set(k,v);},removeItem(k){store.delete(k);}};
   const video=createPage(session,{split:true});await video.ready();
+  await video.fire('SMZ_X_MEDIA_DIAGNOSTIC',{diagnostic:{postId:'2121034947280753090',phase:'extracted',operation:'UserMedia',receivedCount:20,firstMediaCount:20,extractedCount:20,imageCount:20,videoCount:0,ignoredCount:0,url:'PRIVATE_URL',token:'PRIVATE_TOKEN'}});
+  const diagnostic=video.sent.find(m=>m.type==='SMZ_X_MEDIA_DIAGNOSTIC');
+  assert.equal(diagnostic.diagnostic.receivedCount,20);assert.equal(diagnostic.collectionId,'job1');assert(!JSON.stringify(diagnostic).includes('PRIVATE_'));
+  console.log('PASS X content diagnostic relay: active job identity and allowlisted fields only');
   await video.fire('SMZ_X_MEDIA_BATCH',{items:[{key:'2110_1',postId:'2110',type:'video'}]});
   await video.ctx.__test.completeCollection({endOfFeed:true});
   assert.match(video.location.href,/\/demo\/media\?filter=photo$/);

@@ -10,7 +10,7 @@
   const MAX_JSON_CHARS = 128 * 1024 * 1024;
   const itemFields = ['postedAt', 'extension', 'sourceType', 'cid', 'mediaId'];
   const stateStringFields = ['collectionId', 'collectionMode', 'status', 'pauseReason', 'collectionPhase',
-    'newestPostId', 'oldestPostId', 'deltaBaselinePostId', 'deltaEndReason', 'resumeCursor'];
+    'newestPostId', 'oldestPostId', 'deltaBaselinePostId', 'deltaEndReason', 'resumeCursor','repairBaselinePostedAt'];
   const stateNumFields = ['schemaVersion', 'startedAt', 'updatedAt', 'completedAt', 'displayMediaCount',
     'deltaBaselineCollectedAt', 'lastNewCheckAt', 'lastNewCheckResult'];
   const archiveStringFields = ['status','splitMode','mediaKind','saveMode',
@@ -155,8 +155,13 @@
     if (platform === 'bluesky') { out.did = v.did; out.pds = safePdsOrigin(v.pds); }
     for (const f of stateStringFields) { const s = str(v[f], 300); if (s !== null) out[f] = s; }
     for (const f of stateNumFields) { const n = num(v[f]); if (n !== null) out[f] = n; }
-    for (const f of ['deltaMode','deltaBoundaryReached','deltaVerified','lastNewCheckVerified']) {
+    for (const f of ['deltaMode','deltaBoundaryReached','deltaVerified','lastNewCheckVerified','repairMode','lastCheckWasRepair','captureReloadRequired']) {
       if (typeof v[f] === 'boolean') out[f] = v[f];
+    }
+    if (Array.isArray(v.knownMediaKeys)) {
+      if (v.knownMediaKeys.length > MAX_ITEMS) throw new Error('既知メディア情報が上限を超えています');
+      const pattern = platform === 'bluesky' ? /^[a-zA-Z0-9._~-]{1,80}_[1-9]\d{0,2}$/ : /^\d{1,30}_[1-9]\d{0,2}$/;
+      out.knownMediaKeys = [...new Set(v.knownMediaKeys.filter(key => typeof key === 'string' && pattern.test(key) && Number(key.slice(key.lastIndexOf('_')+1)) <= 200))];
     }
     out.deltaOlderPostIds = (Array.isArray(v.deltaOlderPostIds) ? v.deltaOlderPostIds : [])
       .filter((id) => platform === 'x' ? /^\d{1,24}$/.test(String(id)) : platform === 'threads' ? /^\d{5,30}$/.test(String(id)) : /^[a-zA-Z0-9._~-]{1,80}$/.test(String(id))).slice(0, 6).map(String);

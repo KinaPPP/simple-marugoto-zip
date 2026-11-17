@@ -90,12 +90,22 @@
     const recordMedia = embed.$type === 'app.bsky.embed.recordWithMedia' ? embed.media : embed;
     const postedAt = post.record.createdAt || post.indexedAt || null;
     const items = [];
-    if (recordMedia?.$type === 'app.bsky.embed.images') {
-      const views = post.embed?.$type === 'app.bsky.embed.recordWithMedia#view' ? post.embed.media?.images : post.embed?.images;
-      (recordMedia.images || []).slice(0, 10).forEach((img, i) => {
+    const isGallery = recordMedia?.$type === 'app.bsky.embed.gallery';
+    if (recordMedia?.$type === 'app.bsky.embed.images' || isGallery) {
+      const images = isGallery ? recordMedia.items : recordMedia.images;
+      if (!Array.isArray(images) || !images.length || images.length > 20) {
+        throw new Error('Blueskyの画像・ギャラリー情報を確認できません');
+      }
+      const view = post.embed?.$type === 'app.bsky.embed.recordWithMedia#view' ? post.embed.media : post.embed;
+      const views = isGallery ? null : view?.images;
+      images.forEach((img, i) => {
+        // 未確認のgallery要素を黙って除外すると、欠落したまま収集完了になる。
+        if (isGallery && img?.$type !== 'app.bsky.embed.gallery#image') {
+          throw new Error('Blueskyのギャラリーに未対応のメディア形式があります');
+        }
         const cid = cidFrom(img.image);
         const url = blobUrl(pds, did, cid);
-        if (!url) return;
+        if (!url) throw new Error('Blueskyの画像・ギャラリーの原本情報を確認できません');
         const fallback = views?.[i]?.fullsize;
         const fallbackUrls = typeof fallback === 'string' && /^https:\/\/cdn\.bsky\.app\//.test(fallback) ? [fallback] : [];
         const ext = String(img.image?.mimeType || '').split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
@@ -110,6 +120,8 @@
         items.push({ platform: 'bluesky', key: `${postId}_1`, postId, mediaIndex: 1,
           type: 'video', url, fallbackUrls: [], extension: ext, postedAt, cid });
       }
+    } else if (recordMedia?.$type && !['app.bsky.embed.external','app.bsky.embed.record'].includes(recordMedia.$type)) {
+      throw new Error('Blueskyに未対応のメディア形式があります');
     }
     return { postId, items };
   }

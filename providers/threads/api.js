@@ -100,6 +100,37 @@
     if (!validId(id)) throw new Error('ThreadsのカルーセルIDが不正です');
     return request('/' + id, { fields: 'id,media_type,media_url,thumbnail_url' }, token, fetcher);
   }
+  function childCursor(paging) {
+    if (!paging?.next) return null;
+    // nextにはトークンが含まれ得る。参照先へアクセスせずcursorだけ検証する。
+    let next;
+    try { next = new URL(paging.next); } catch { throw new Error('Threadsの子メディアのページ位置を確認できません'); }
+    if (next.protocol !== 'https:' || next.hostname !== 'graph.threads.net' || next.username || next.password || next.port) {
+      throw new Error('Threadsの子メディアのページ位置を確認できません');
+    }
+    const cursor = paging.cursors?.after || next.searchParams.get('after');
+    if (typeof cursor !== 'string' || !cursor || cursor.length > 2048) throw new Error('Threadsの子メディアのページ位置が不正です');
+    return cursor;
+  }
+  async function carouselChildren(post, token, fetcher) {
+    const first = Array.isArray(post.children) ? post.children : post.children?.data;
+    if (!Array.isArray(first) || first.length < 1 || first.length > 20) {
+      throw new Error(`Threads投稿 ${post.id} のカルーセル情報を取得できません`);
+    }
+    const children = [...first], cursors = new Set();
+    let cursor = childCursor(post.children?.paging);
+    while (cursor) {
+      if (cursors.has(cursor) || cursors.size >= 20) throw new Error('Threadsの子メディアのページ位置が繰り返されています');
+      cursors.add(cursor);
+      const page = await request('/' + post.id + '/children', {fields:'id,media_type,media_url,thumbnail_url',limit:20,after:cursor}, token, fetcher);
+      if (!Array.isArray(page.data) || !page.data.length || children.length + page.data.length > 20) {
+        throw new Error(`Threads投稿 ${post.id} の子メディアをすべて確認できません`);
+      }
+      children.push(...page.data);
+      cursor = childCursor(page.paging);
+    }
+    return children;
+  }
   async function extract(post, token, fetcher = fetch) {
     if (!validId(post?.id)) return null;
     const postId = String(post.id);
@@ -107,7 +138,7 @@
     const postedAt = Number.isFinite(Date.parse(post.timestamp)) ? new Date(post.timestamp).toISOString() : null;
     const items = [];
     const make = (source, index) => {
-      if (!['IMAGE','VIDEO'].includes(source?.media_type)) return;
+      if (!['IMAGE','VIDEO'].includes(source?.media_type)) throw new Error(`Threads投稿 ${postId} に未対応の子メディアがあります`);
       const url = mediaUrl(source.media_url);
       if (!url) throw new Error(`Threads投稿 ${postId} のメディアURLが無効です。取得できる投稿で再試行してください`);
       const type = source.media_type === 'VIDEO' ? 'video' : 'image';
@@ -117,14 +148,15 @@
         mediaId: validId(source.id) ? String(source.id) : null });
     };
     if (post.media_type === 'CAROUSEL_ALBUM') {
-      const children = Array.isArray(post.children) ? post.children : post.children?.data;
-      if (!Array.isArray(children) || children.length < 1 || children.length > 20) {
-        throw new Error(`Threads投稿 ${postId} のカルーセル情報を取得できません`);
-      }
+      const children = await carouselChildren(post, token, fetcher);
+      const seen = new Set();
       for (const [i, raw] of children.entries()) {
         const c = typeof raw === 'string' ? { id: raw } : raw;
         if (!validId(c?.id)) throw new Error(`Threads投稿 ${postId} の子投稿IDが不正です`);
+        if (seen.has(String(c.id))) throw new Error(`Threads投稿 ${postId} の子メディアが重複しています`);
+        seen.add(String(c.id));
         const detail = c?.media_url && c?.media_type ? c : await child(c.id, token, fetcher);
+        if (String(detail?.id) !== String(c.id)) throw new Error(`Threads投稿 ${postId} の子メディアIDが一致しません`);
         make(detail, i + 1);
       }
     } else if (post.media_type === 'IMAGE' || post.media_type === 'VIDEO') make(post, 1);

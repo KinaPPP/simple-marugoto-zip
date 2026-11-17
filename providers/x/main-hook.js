@@ -5,18 +5,34 @@
   let enabled = false;
   let targetHandle = '';
   let requestSequence = 0;
-  const seenPayloadTweets = new Set();
+  const seenPayloadMedia = new Set();
+  const firstPayloadMediaCounts = new Map();
+  const DIAGNOSTIC_POST_IDS=['2121977622796353698','2121951663368159350'];
+  const DIAGNOSTIC_ASSET_IDS=['HXLHJ4JaQAA4Meo','HXLHLWRaAAAhEEY','HXLHNUQbkAAh-Pu','HXLHPJ-aYAAggMZ','HXLHRVbbUAAwYC5','HXLHTJebQAAou5D','HXLHU8ZaAAAxz5w','HXLHWs4aMAAq8iF'];
+  const earlyCaptureDiagnostics=[];
+  function reportCapture(diagnostic) {
+    try {
+      const value={version:'1.3.16',...diagnostic};
+      if(!receiverReady){earlyCaptureDiagnostics.push(value);if(earlyCaptureDiagnostics.length>30)earlyCaptureDiagnostics.shift();}
+      else post('SMZ_X_CAPTURE_DIAGNOSTIC',{diagnostic:value});
+    } catch {}
+  }
   // /media の初期レスポンスがcontent scriptの起動より早く届いても落とさない。
-  // 受信側の準備完了まで直近のバッチだけ一時保持してから一度だけ再送する。
+  // 登録完了のACKまで保持する。確認待ちや一時停止は受信準備完了と区別する。
   let receiverReady = false;
-  const earlyBatches = [];
-  const MAX_EARLY_BATCHES = 12;
+  const pendingBatches = new Map();
+  let collectionId = '';
+  let batchSequence = 0;
+  let scopeGeneration = 0;
+  const earlyDiagnostics = [];
+  const MAX_PENDING_BATCHES = 120;
 
   try {
     const pendingHandle = sessionStorage.getItem('smz_x_collect_handle');
     if (pendingHandle) {
       enabled = true;
       targetHandle = pendingHandle.replace(/^@/, '').toLowerCase();
+      collectionId = sessionStorage.getItem('smz_x_collect_id') || '';
     }
   } catch {}
 
@@ -65,6 +81,31 @@
     window.postMessage({ source: POST_SOURCE, type, ...payload }, '*');
   }
 
+  function clearCapture() {
+    scopeGeneration++;
+    seenPayloadMedia.clear();
+    firstPayloadMediaCounts.clear();
+    pendingBatches.clear();
+    earlyDiagnostics.length = 0;
+    earlyCaptureDiagnostics.length = 0;
+  }
+
+  function queueBatch(items, requestUrl) {
+    if (!items.length) return;
+    if (pendingBatches.size >= MAX_PENDING_BATCHES) {
+      // 未登録データを押し出して正常完了させない。停止して再走査を促す。
+      enabled = false;
+      seenPayloadMedia.clear();
+      firstPayloadMediaCounts.clear();
+      post('SMZ_X_CAPTURE_ERROR', { collectionId, error: '収集データの登録待ちが上限に達しました。停止位置から再収集してください。' });
+      return;
+    }
+    const batchId = `xbatch_${++batchSequence}`;
+    const batch = { batchId, collectionId, handle: targetHandle, items, requestUrl };
+    pendingBatches.set(batchId, batch);
+    if (receiverReady) post('SMZ_X_MEDIA_BATCH', batch);
+  }
+
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.source !== POST_SOURCE) return;
     if (event.data.type === 'SMZ_X_UI_SETTINGS') {
@@ -72,17 +113,36 @@
       inspectProfileLayout(true);
       return;
     }
+    if (event.data.type === 'SMZ_X_BATCH_ACK') {
+      const batch = pendingBatches.get(event.data.batchId);
+      if (batch && event.data.collectionId === batch.collectionId) pendingBatches.delete(event.data.batchId);
+      return;
+    }
     if (event.data.type === 'SMZ_X_CONTROL') {
-      enabled = !!event.data.enabled;
-      targetHandle = String(event.data.handle || '').replace(/^@/, '').toLowerCase();
-      if (!enabled) {
+      const nextHandle = String(event.data.handle || '').replace(/^@/, '').toLowerCase();
+      const nextId = String(event.data.collectionId || '');
+      if (targetHandle !== nextHandle || (nextId && collectionId && collectionId !== nextId)) clearCapture();
+      targetHandle = nextHandle;
+      // v1.3.15以前のタブにはhandleだけの再開マーカーが残る。
+      // 同じ対象の初回データを引き継ぐ際、ACKにも確定したジョブIDを使う。
+      if (!collectionId && nextId) {
+        for (const batch of pendingBatches.values()) batch.collectionId = nextId;
+      }
+      collectionId = nextId || collectionId;
+      if (!event.data.enabled) {
         receiverReady = false;
-        seenPayloadTweets.clear();
-        earlyBatches.length = 0;
+        enabled = event.data.preservePending === true;
+        if (!enabled) clearCapture();
       } else {
-        receiverReady = true;
-        for (const batch of earlyBatches) post('SMZ_X_MEDIA_BATCH', batch);
-        earlyBatches.length = 0;
+        enabled = true;
+        receiverReady = event.data.deliveryReady !== false;
+        if (!receiverReady) return;
+        reportCapture({phase:'hook_ready'});
+        for(const diagnostic of earlyCaptureDiagnostics){try{post('SMZ_X_CAPTURE_DIAGNOSTIC',{diagnostic});}catch{}}
+        earlyCaptureDiagnostics.length=0;
+        for (const diagnostic of earlyDiagnostics) {try {post('SMZ_X_MEDIA_DIAGNOSTIC',{diagnostic});} catch {}}
+        earlyDiagnostics.length = 0;
+        for (const batch of pendingBatches.values()) post('SMZ_X_MEDIA_BATCH', batch);
       }
       inspectProfileLayout(true);
     }
@@ -97,6 +157,7 @@
 
   function beginRelevantRequest(requestUrl) {
     const requestId = `xreq_${Date.now()}_${++requestSequence}`;
+    reportCapture({phase:'request'});
     post('SMZ_X_REQUEST_START', { requestId, requestUrl });
     return requestId;
   }
@@ -167,23 +228,22 @@
     }
   }
 
-  function extractFromTweet(tweet) {
+  function extractFromTweet(tweet, operation, capture) {
     const legacy = tweet?.legacy;
     if (!legacy || typeof legacy !== 'object') return [];
     const postId = String(legacy.id_str || tweet.rest_id || '');
     if (!/^\d+$/.test(postId)) return [];
-    if (legacy.retweeted_status_id_str) return [];
+    if (legacy.retweeted_status_id_str) {if(capture&&DIAGNOSTIC_POST_IDS.includes(postId))capture.targetReasons.add('retweet');return [];}
 
     const author = authorHandle(tweet);
-    if (targetHandle && author && author !== targetHandle) return [];
-    if (targetHandle && !author) return [];
+    if (targetHandle && author && author !== targetHandle) {if(capture){capture.authorRejectedCount++;if(DIAGNOSTIC_POST_IDS.includes(postId))capture.targetReasons.add('author_mismatch');}return [];}
+    if (targetHandle && !author) {if(capture){capture.authorRejectedCount++;if(DIAGNOSTIC_POST_IDS.includes(postId))capture.targetReasons.add('missing_author');}return [];}
 
     const media = legacy?.extended_entities?.media;
     if (!Array.isArray(media) || !media.length) return [];
 
     const payloadKey = `${postId}:${targetHandle}`;
-    if (seenPayloadTweets.has(payloadKey)) return [];
-    seenPayloadTweets.add(payloadKey);
+    if (!firstPayloadMediaCounts.has(payloadKey)) firstPayloadMediaCounts.set(payloadKey,media.length);
 
     const postedAt = postedAtFromId(postId, legacy);
     const items = [];
@@ -191,12 +251,15 @@
     for (let i = 0; i < media.length; i++) {
       const entity = media[i] || {};
       const mediaIndex = i + 1;
+      const seenKey = `${payloadKey}:${mediaIndex}`;
+      if (seenPayloadMedia.has(seenKey)) continue;
 
       if (entity.video_info?.variants?.length) {
         const mp4 = entity.video_info.variants
           .filter((variant) => variant?.url && (!variant.content_type || variant.content_type === 'video/mp4'))
           .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
         if (!mp4?.url) continue;
+        seenPayloadMedia.add(seenKey);
         items.push({
           key: `${postId}_${mediaIndex}`,
           platform: 'x',
@@ -219,6 +282,7 @@
       const rawImage = entity.media_url_https || entity.media_url;
       if (!rawImage) continue;
       const image = buildImageVariants(rawImage);
+      seenPayloadMedia.add(seenKey);
       items.push({
         key: `${postId}_${mediaIndex}`,
         platform: 'x',
@@ -236,10 +300,29 @@
       });
     }
 
+    if (!items.length && capture) capture.duplicateCount++;
+    reportMediaDiagnostic(postId,media.length,firstPayloadMediaCounts.get(payloadKey),items,items.length?'extracted':'duplicate_post',undefined,operation);
     return items;
   }
 
-  function extractMedia(root) {
+  // 診断は数値と投稿IDだけ。失敗しても本来の収集を中断しない。
+  function reportMediaDiagnostic(postId,receivedCount,firstMediaCount,items,phase,reason,operation) {
+    if (receivedCount<=4 && firstMediaCount<=4) return;
+    try {
+      const diagnostic={postId,phase,reason,operation,receivedCount,firstMediaCount,
+        extractedCount:items.length,imageCount:items.filter(item=>item.type==='image').length,
+        videoCount:items.filter(item=>item.type==='video').length,ignoredCount:receivedCount-items.length};
+      if (!receiverReady) {
+        earlyDiagnostics.push(diagnostic);if(earlyDiagnostics.length>100)earlyDiagnostics.shift();
+      } else post('SMZ_X_MEDIA_DIAGNOSTIC',{diagnostic});
+    } catch {}
+  }
+
+  function extractMedia(root, requestUrl, httpStatus = 200) {
+    const op=String(requestUrl||'').split('?')[0].split('/').pop();
+    const operation=['UserMedia','UserTweets','TweetDetail','TweetResultByRestId','SearchTimeline'].includes(op)?op:'Other';
+    const capture={phase:'response',operation,httpStatus,reason:'parsed',objectsSeen:0,tweetCandidates:0,noLegacyCount:0,noMediaCount:0,authorRejectedCount:0,duplicateCount:0,extractedCount:0,targetReasons:new Set()};
+    const matchedPosts=new Set(),matchedAssets=new Set(),shapes=new Set();
     const items = [];
     const stack = [root];
     const visited = new Set();
@@ -252,9 +335,36 @@
       if (visited.has(value)) continue;
       visited.add(value);
       inspected++;
+      // 抽出対象外のオブジェクトも観察する。値や本文はログへ渡さない。
+      try {
+      const objectId=String(value.rest_id||value.id_str||'');
+      if(objectId && (value.core?.user_results || value.author || /Tweet/.test(String(value.__typename||'')) || DIAGNOSTIC_POST_IDS.includes(objectId))) {
+        capture.tweetCandidates++;
+        if(!value.legacy)capture.noLegacyCount++;
+        else if(!Array.isArray(value.legacy?.extended_entities?.media))capture.noMediaCount++;
+        if(DIAGNOSTIC_POST_IDS.includes(objectId)) {
+          if(!value.legacy)capture.targetReasons.add('no_legacy');
+          else if(!Array.isArray(value.legacy?.extended_entities?.media))capture.targetReasons.add('no_media');
+        }
+        if(DIAGNOSTIC_POST_IDS.includes(objectId) || (capture.noLegacyCount>0&&shapes.size<3)) {
+          shapes.add(Object.keys(value).filter(k=>/^[A-Za-z_][A-Za-z0-9_]{0,49}$/.test(k)).slice(0,20).join(','));
+        }
+      }
+      for(const child of Object.values(value))if(typeof child==='string') {
+        for(const id of DIAGNOSTIC_POST_IDS)if(child.includes(id))matchedPosts.add(id);
+        for(const id of DIAGNOSTIC_ASSET_IDS)if(child.includes(id))matchedAssets.add(id);
+      }
+      } catch {}
+
+      for (const field of ['mediaDetails','media_details']) {
+        if (Array.isArray(value[field]) && value[field].length>4) {
+          const candidateId=String(value.rest_id||value.id_str||'');
+          reportMediaDiagnostic(/^\d{1,24}$/.test(candidateId)?candidateId:null,value[field].length,0,[],'alternate_shape',field,operation);
+        }
+      }
 
       if (value.legacy?.extended_entities?.media && (value.rest_id || value.legacy?.id_str)) {
-        items.push(...extractFromTweet(value));
+        items.push(...extractFromTweet(value,operation,capture));
       }
 
       if (Array.isArray(value)) {
@@ -266,6 +376,8 @@
       }
     }
 
+    reportCapture({...capture,objectsSeen:inspected,extractedCount:items.length,targetPostCount:matchedPosts.size,targetAssetCount:matchedAssets.size,
+      targetPostIds:[...matchedPosts].join(','),targetAssetIds:[...matchedAssets].join(','),targetReasons:[...capture.targetReasons].join(','),shapeKeys:[...shapes].slice(0,3).join(';').slice(0,500)});
     return items;
   }
 
@@ -279,9 +391,10 @@
     return null;
   }
 
-  async function inspectFetchResponse(response, requestUrl, requestId) {
+  async function inspectFetchResponse(response, requestUrl, requestId, generation) {
     try {
-      if (!enabled) return;
+      if (!enabled || generation !== scopeGeneration) return;
+      if (!response.ok) reportCapture({phase:'response',httpStatus:Number(response.status)||0,reason:'http_error'});
       if (response.status === 429) {
         post('SMZ_X_RATE_LIMIT', { resumeAt: rateLimitResumeAt(response.headers), requestUrl });
         return;
@@ -293,18 +406,12 @@
       if (!response.ok) return;
       try {
         const data = await response.json();
-        const items = extractMedia(data);
-        if (items.length) {
-          const batch = { items, requestUrl };
-          if (!receiverReady) {
-            earlyBatches.push(batch);
-            if (earlyBatches.length > MAX_EARLY_BATCHES) earlyBatches.shift();
-          }
-          post('SMZ_X_MEDIA_BATCH', batch);
-        }
-      } catch {}
+        if (!enabled || generation !== scopeGeneration) return;
+        const items = extractMedia(data,requestUrl,response.status);
+        queueBatch(items, requestUrl);
+      } catch {reportCapture({phase:'response',httpStatus:Number(response.status)||0,reason:'parse_error'});}
     } finally {
-      endRelevantRequest(requestId, requestUrl, response?.status || 0);
+      if (generation === scopeGeneration) endRelevantRequest(requestId, requestUrl, response?.status || 0);
     }
   }
 
@@ -312,16 +419,18 @@
   window.fetch = async function (...args) {
     const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
     const requestId = enabled && isRelevantUrl(requestUrl) ? beginRelevantRequest(requestUrl) : null;
+    const generation = scopeGeneration;
 
     try {
       const response = await originalFetch.apply(this, args);
       if (requestId) {
         // X本体へレスポンスはすぐ返しつつ、複製したレスポンスの解析完了まで
         // 収集側には「処理中」と伝えて次スクロールを急がせない。
-        void inspectFetchResponse(response.clone(), requestUrl || response.url, requestId);
+        void inspectFetchResponse(response.clone(), requestUrl || response.url, requestId, generation);
       }
       return response;
     } catch (error) {
+      if(requestId)reportCapture({phase:'response',httpStatus:0,reason:'network_error'});
       if (requestId) endRelevantRequest(requestId, requestUrl, 0);
       throw error;
     }
@@ -340,11 +449,13 @@
     OriginalXHR.prototype.send = function (...args) {
       const requestUrl = this.__smzUrl || '';
       const requestId = enabled && isRelevantUrl(requestUrl) ? beginRelevantRequest(requestUrl) : null;
+      const generation = scopeGeneration;
 
       if (requestId) {
         this.addEventListener('loadend', () => {
           try {
-            if (!enabled) return;
+            if (!enabled || generation !== scopeGeneration) return;
+            if(this.status<200||this.status>=300)reportCapture({phase:'response',httpStatus:Number(this.status)||0,reason:'http_error'});
             if (this.status === 429) {
               post('SMZ_X_RATE_LIMIT', { resumeAt: null, requestUrl });
               return;
@@ -356,18 +467,11 @@
             if (this.status < 200 || this.status >= 300) return;
             try {
               const data = this.responseType === 'json' ? this.response : JSON.parse(this.responseText);
-              const items = extractMedia(data);
-              if (items.length) {
-                const batch = { items, requestUrl };
-                if (!receiverReady) {
-                  earlyBatches.push(batch);
-                  if (earlyBatches.length > MAX_EARLY_BATCHES) earlyBatches.shift();
-                }
-                post('SMZ_X_MEDIA_BATCH', batch);
-              }
-            } catch {}
+              const items = extractMedia(data,requestUrl,this.status);
+              queueBatch(items, requestUrl);
+            } catch {reportCapture({phase:'response',httpStatus:Number(this.status)||0,reason:'parse_error'});}
           } finally {
-            endRelevantRequest(requestId, requestUrl, this.status || 0);
+            if (generation === scopeGeneration) endRelevantRequest(requestId, requestUrl, this.status || 0);
           }
         }, { once: true });
       }

@@ -1,4 +1,4 @@
-if (typeof importScripts === 'function') importScripts('debug/trace-core.js','debug/trace-store.js','debug/trace-client.js');
+if (typeof importScripts === 'function') importScripts('debug/trace-core.js','debug/trace-store.js','debug/trace-client.js','debug/x-media.js');
 if (!globalThis.SMZBackup) importScripts('backup/schema.js');
 if (!globalThis.SMZBluesky && typeof importScripts === 'function') importScripts('providers/bluesky/api.js');
 if (!globalThis.SMZThreads && typeof importScripts === 'function') importScripts('providers/threads/api.js');
@@ -459,6 +459,11 @@ function canStartNewOnlyCheck(state) {
   return allCurrentMediaArchived(state);
 }
 
+function canStartRepairCheck(state) {
+  return state?.status === 'complete' && state.archive?.status !== 'archiving' &&
+    (Number(state.counts?.total || 0) === 0 || canStartNewOnlyCheck(state));
+}
+
 async function getCollection(platform, handle) {
   const key = collectionKey(platform, handle);
   const data = await chrome.storage.local.get(key);
@@ -597,6 +602,25 @@ function makeDeltaCollection(previous, tabId, mode) {
   return next;
 }
 
+async function inheritKnownMedia(next, previous, repairMode) {
+  const oldKey = previousCollectionKey(previous.platform, previous.handle);
+  const older = (await chrome.storage.local.get(oldKey))[oldKey];
+  const known = new Set();
+  for (const state of [older, previous]) {
+    if (!state || state.platform !== previous.platform || state.handle !== previous.handle) continue;
+    for (const key of state.knownMediaKeys || []) known.add(key);
+    for (const item of state.items || []) known.add(item.key);
+  }
+  if (known.size > 120000) throw new Error('再収集用の既知メディア情報が上限に達しています。バックアップを保存してください');
+  next.knownMediaKeys = [...known];
+  next.repairMode = repairMode === true;
+  if (next.repairMode) {
+    next.deltaBaselinePostId = previous.newestPostId || null;
+    next.repairBaselinePostedAt = previous.items.find(item=>item.postId === previous.newestPostId)?.postedAt || previous.repairBaselinePostedAt || null;
+  }
+  return next;
+}
+
 async function finishCollectionState(current, { endOfFeed = false, manual = false } = {}) {
   current.status = 'complete';
   current.collectionPhase = null;
@@ -607,8 +631,18 @@ async function finishCollectionState(current, { endOfFeed = false, manual = fals
   current.items.sort(current.platform === 'threads' ? (a,b) => (Date.parse(b.postedAt || '') || 0) - (Date.parse(a.postedAt || '') || 0) || (a.postId === b.postId ? a.mediaIndex-b.mediaIndex : compareNumericPostIds(b.postId,a.postId)) : current.platform === 'bluesky' ? (a,b) => a.postId === b.postId ? a.mediaIndex-b.mediaIndex : a.postId>b.postId ? -1 : 1 : comparePostIdsDesc);
   current.newestPostId = current.items[0]?.postId || null;
   current.oldestPostId = current.items.at(-1)?.postId || null;
+  if (current.repairMode) {
+    // 不足分が古い投稿だけでも、次回の新規分チェックの境界を後退させない。
+    const baseline = current.deltaBaselinePostId;
+    const candidateTime = Date.parse(current.items[0]?.postedAt || '');
+    const baselineTime = Date.parse(current.repairBaselinePostedAt || '');
+    const preserveBaseline = current.platform === 'threads'
+      ? !Number.isFinite(candidateTime) || !Number.isFinite(baselineTime) || candidateTime <= baselineTime
+      : current.platform === 'bluesky' ? baseline > current.newestPostId : compareNumericPostIds(baseline, current.newestPostId) > 0;
+    if (baseline && (!current.newestPostId || preserveBaseline)) current.newestPostId = baseline;
+  }
   if (current.deltaMode) {
-    current.deltaVerified = current.deltaBoundaryReached === true || endOfFeed === true;
+    current.deltaVerified = current.deltaBoundaryReached === true || endOfFeed === true || (current.repairMode && manual);
     current.deltaEndReason = current.deltaBoundaryReached ? 'previous_boundary' :
       endOfFeed ? 'end_of_feed' : manual ? 'manual_unverified' : 'unknown';
   }
@@ -620,6 +654,8 @@ async function finishCollectionState(current, { endOfFeed = false, manual = fals
       previous.lastNewCheckAt = current.completedAt;
       previous.lastNewCheckResult = 0;
       previous.lastNewCheckVerified = true;
+      previous.lastCheckWasRepair = current.repairMode === true;
+      if (Array.isArray(current.knownMediaKeys)) previous.knownMediaKeys = current.knownMediaKeys;
       previous.updatedAt = current.updatedAt;
       await chrome.storage.local.set({ [collectionKey(previous.platform, previous.handle)]: previous });
       await chrome.storage.local.remove(key);
@@ -754,7 +790,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await setCollection(state);
     try {
       const result = await sendToTab(target.id, { type: 'SMZ_RESUME_COLLECTION', handle, collectionId: state.collectionId,
-        collectionMode: state.collectionMode || 'auto', deltaBaselinePostId: state.deltaBaselinePostId || null, automatic: true });
+        collectionMode: state.collectionMode || 'auto', deltaBaselinePostId: state.repairMode ? null : state.deltaBaselinePostId || null, automatic: true });
       // Xのエラー画面などでcontent側が再開を受け付けなかった場合は、収集中と誤表示しない。
       if (!result?.ok) throw new Error(result?.error || 'Xの画面から自動再開できませんでした');
     } catch (error) {
@@ -805,6 +841,8 @@ async function runBlueskyCollection(handle, job) {
       for (const entry of page.feed) {
         const post = SMZBluesky.extract(entry, job.did, job.pds);
         if (!post) continue;
+        if (post.items.length > 4) globalThis.SMZDirectoryTrace?.emit('media.extract', {platform:'bluesky',account:handle,collectionId:job.collectionId,
+          postId:post.postId,extractedCount:post.items.length,imageCount:post.items.filter(v=>v.type==='image').length,videoCount:post.items.filter(v=>v.type==='video').length});
         scanned++;
         if (job.baseline && post.postId <= job.baseline) {
           boundaryReached = true;
@@ -816,7 +854,7 @@ async function runBlueskyCollection(handle, job) {
       const endOfFeed = !nextCursor || page.feed.length === 0;
       const state = await withCollectionLock('bluesky', handle, async (current) => {
         if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting' || job.stopped) return null;
-        const existing = new Set(current.items.map(v => v.key));
+        const existing = new Set([...current.items.map(v => v.key), ...(current.knownMediaKeys || [])]);
         const addedItems = [];
         for (const item of collected) {
           if (existing.has(item.key)) continue;
@@ -960,13 +998,15 @@ async function runThreadsCollection(handle, job) {
         const postId = String(post.id);
         if (job.baseline && (postId === job.baseline || previousPostIds?.has(postId))) { boundaryReached = true; break; }
         const extracted = await SMZThreads.extract(post, auth.token, fetcher);
+        if (extracted?.items.length > 4) globalThis.SMZDirectoryTrace?.emit('media.extract', {platform:'threads',account:handle,collectionId:job.collectionId,
+          postId:extracted.postId,extractedCount:extracted.items.length,imageCount:extracted.items.filter(v=>v.type==='image').length,videoCount:extracted.items.filter(v=>v.type==='video').length});
         if (extracted) collected.push(...extracted.items);
       }
       const nextCursor = page.cursor && page.cursor !== cursor ? page.cursor : null;
       const endOfFeed = !nextCursor || page.data.length === 0;
       const state = await withCollectionLock('threads', handle, async current => {
         if (!current || current.collectionId !== job.collectionId || current.status !== 'collecting' || job.stopped) return null;
-        const keys = new Set(current.items.map(item => item.key));
+        const keys = new Set([...current.items.map(item => item.key), ...(current.knownMediaKeys || [])]);
         const addedItems = [];
         for (const item of collected) {
           if (keys.has(item.key)) continue;
@@ -985,7 +1025,7 @@ async function runThreadsCollection(handle, job) {
         current.resumeCursor = nextCursor;
         if (current.deltaMode) current.deltaBoundaryReached = boundaryReached;
         current.updatedAt = Date.now();
-        if (current.deltaMode && endOfFeed && !boundaryReached) {
+        if (current.deltaMode && !current.repairMode && endOfFeed && !boundaryReached) {
           current.status = 'paused';
           current.pauseReason = 'delta_boundary_missing';
           current.deltaVerified = false;
@@ -1082,7 +1122,7 @@ async function recoverApiCollections() {
         own: state.ownProfile === true,
         authUserId: boundAuthUserId ? String(boundAuthUserId) : null,
         collectionId: state.collectionId,
-        baseline: state.deltaMode ? state.deltaBaselinePostId : null,
+        baseline: state.deltaMode && !state.repairMode ? state.deltaBaselinePostId : null,
         cursor: state.resumeCursor || null,
         stopped: false,
         abort: new AbortController()
@@ -1111,7 +1151,7 @@ async function recoverApiCollections() {
       did: state.did,
       pds: state.pds,
       collectionId: state.collectionId,
-      baseline: state.deltaMode ? state.deltaBaselinePostId : null,
+      baseline: state.deltaMode && !state.repairMode ? state.deltaBaselinePostId : null,
       cursor: state.resumeCursor || null,
       stopped: false,
       abort: new AbortController()
@@ -1154,7 +1194,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === 'SMZ_TRACE_CLEAR') { const cleared=await store?.clear();sendResponse(cleared||{ok:false,error:'診断ログの保存機能を利用できません'});return; }
       const all = await chrome.storage.local.get(null);
       const current = Object.entries(all).filter(([key])=>key.startsWith(COLLECTION_PREFIX)).map(([,state])=>globalThis.SMZDirectoryTrace?.snapshot(state));
-      sendResponse({ok:true,version:chrome.runtime.getManifest().version,extensionId:chrome.runtime.id,current,log:await store?.get()});return;
+      const log=await store?.get();
+      const wanted=new Map();
+      for(const entry of log?.entries||[]) {
+        const f=entry.fields||{};
+        if(entry.event==='x.media.response'&&/^\d{1,24}$/.test(f.postId||''))wanted.set(f.postId,Math.max(wanted.get(f.postId)||0,f.receivedCount||0));
+      }
+      const xMedia=Object.entries(all).filter(([key,state])=>key.startsWith(COLLECTION_PREFIX)&&state?.platform==='x')
+        .map(([,state])=>globalThis.SMZXMediaDebug?.summarize(state,wanted)).filter(Boolean);
+      sendResponse({ok:true,version:chrome.runtime.getManifest().version,extensionId:chrome.runtime.id,current,xMedia,log});return;
     }
     // 全体初期化と新しい保存/収集の競合を防ぐ。
     if (fullResetInProgress && !['SMZ_SYNC_TOOLBAR', 'SMZ_BACKUP_RESET_ALL'].includes(message.type)) {
@@ -1284,58 +1332,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'SMZ_THREADS_START_COLLECTION': {
-        await apiRecoveryPromise.catch(() => {});
-        const auth = await getThreadsAuth();
-        if (!auth?.token) throw new Error('設定画面からThreadsに接続してください');
-        const actor = normalizeHandle(message.handle);
-        const profile = await SMZThreads.profile(actor, auth.token, {handle: auth.username});
-        const key = collectionKey('threads', profile.handle);
-        if (threadsJobs.has(key)) throw new Error('Threadsの収集がまだ進行中です');
-        await acknowledgeArchiveCompletions();
-        let state = await getCollection('threads', profile.handle);
-        if (state?.archive?.status === 'archiving') throw new Error('ZIP保存中です');
-        // Service Worker再起動後の collecting は recoverApiCollections() が
-        // 保存済みcursorから復旧する。ここでpausedへ書き換えない。
-        if (state?.status === 'collecting') throw new Error('Threadsの収集がまだ進行中です');
-        if (state?.resumeAt && state.pauseReason === 'rate_limit' && state.resumeAt > Date.now()) {
-          throw new Error('Threads APIのアクセス制限が終了するまで待ってください');
-        }
-        if (message.newOnly) {
-          if (!canStartNewOnlyCheck(state)) throw new Error('差分確認前に前回のZIP保存を完了してください');
-          const previous = state;
-          state = threadNewCollection(profile, auth.userId);
-          state.deltaMode = true;
-          state.deltaBaselinePostId = previous.newestPostId;
-          state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
-          const baselineCounts = SMZBackup.cumulativeCounts(previous);
-          if (baselineCounts) state.deltaBaselineCounts = baselineCounts;
-          state.deltaBoundaryReached = false;
-          state.deltaVerified = false;
-          state.deltaSavedKinds = { images:false, videos:false };
-          state.preferredSaveDirectoryKey = previous.archive?.saveDirectoryKey || previous.preferredSaveDirectoryKey || null;
-          state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
-          await chrome.storage.local.set({ [previousCollectionKey('threads',profile.handle)]: previous });
-        } else if (message.restart || !state) {
-          state = threadNewCollection(profile, auth.userId);
-        } else if (state.status === 'complete') {
-          throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
-        } else {
-          if (state.authUserId && String(state.authUserId) !== String(auth.userId || '')) {
-            throw new Error('この収集状態は別のThreads接続アカウントで開始されています。元のアカウントへ戻すか進捗をリセットしてください');
+        await withArchiveStartLock(async () => {
+          await apiRecoveryPromise.catch(() => {});
+          const auth = await getThreadsAuth();
+          if (!auth?.token) throw new Error('設定画面からThreadsに接続してください');
+          const actor = normalizeHandle(message.handle);
+          const profile = await SMZThreads.profile(actor, auth.token, {handle: auth.username});
+          const key = collectionKey('threads', profile.handle);
+          if (threadsJobs.has(key)) throw new Error('Threadsの収集がまだ進行中です');
+          await acknowledgeArchiveCompletions();
+          let state = await getCollection('threads', profile.handle);
+          if (state?.archive?.status === 'archiving') throw new Error('ZIP保存中です');
+          // Service Worker再起動後の collecting は recoverApiCollections() が
+          // 保存済みcursorから復旧する。ここでpausedへ書き換えない。
+          if (state?.status === 'collecting') throw new Error('Threadsの収集がまだ進行中です');
+          if (state?.resumeAt && state.pauseReason === 'rate_limit' && state.resumeAt > Date.now()) {
+            throw new Error('Threads APIのアクセス制限が終了するまで待ってください');
           }
-          state.status = 'collecting'; state.pauseReason = null; state.resumeAt = null; state.lastError = null;
-          state.ownProfile = profile.own; state.updatedAt = Date.now();
-        }
-        state.authUserId = auth.userId ? String(auth.userId) : null;
-        state.collectionMode = 'api';
-        const job = { own: profile.own, authUserId: state.authUserId, collectionId: state.collectionId,
-          baseline: state.deltaMode ? state.deltaBaselinePostId : null,
-          cursor: state.resumeCursor || null, stopped:false, abort:new AbortController() };
-        threadsJobs.set(key, job);
-        await setCollection(state);
-        await scheduleApiCollectionWatchdog();
-        void runThreadsCollection(profile.handle, job);
-        sendResponse({ ok: true, state });
+          if (message.newOnly || message.rescan) {
+            if (!(message.rescan ? canStartRepairCheck(state) : canStartNewOnlyCheck(state))) throw new Error('差分確認前に前回のZIP保存を完了してください');
+            const previous = state;
+            state = threadNewCollection(profile, auth.userId);
+            state.deltaMode = true;
+            state.deltaBaselinePostId = previous.newestPostId;
+            state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
+            const baselineCounts = SMZBackup.cumulativeCounts(previous);
+            if (baselineCounts) state.deltaBaselineCounts = baselineCounts;
+            state.deltaBoundaryReached = false;
+            state.deltaVerified = false;
+            state.deltaSavedKinds = { images:false, videos:false };
+            state.preferredSaveDirectoryKey = previous.archive?.saveDirectoryKey || previous.preferredSaveDirectoryKey || null;
+            state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
+            await inheritKnownMedia(state, previous, message.rescan);
+            await chrome.storage.local.set({ [previousCollectionKey('threads',profile.handle)]: previous });
+          } else if (message.restart || !state) {
+            state = threadNewCollection(profile, auth.userId);
+          } else if (state.status === 'complete') {
+            throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
+          } else {
+            if (state.authUserId && String(state.authUserId) !== String(auth.userId || '')) {
+              throw new Error('この収集状態は別のThreads接続アカウントで開始されています。元のアカウントへ戻すか進捗をリセットしてください');
+            }
+            state.status = 'collecting'; state.pauseReason = null; state.resumeAt = null; state.lastError = null;
+            state.ownProfile = profile.own; state.updatedAt = Date.now();
+          }
+          state.authUserId = auth.userId ? String(auth.userId) : null;
+          state.collectionMode = 'api';
+          const job = { own: profile.own, authUserId: state.authUserId, collectionId: state.collectionId,
+            baseline: state.deltaMode && !state.repairMode ? state.deltaBaselinePostId : null,
+            cursor: state.resumeCursor || null, stopped:false, abort:new AbortController() };
+          threadsJobs.set(key, job);
+          await setCollection(state);
+          await scheduleApiCollectionWatchdog();
+          void runThreadsCollection(profile.handle, job);
+          sendResponse({ ok: true, state });
+        });
         break;
       }
       case 'SMZ_THREADS_STOP_COLLECTION': {
@@ -1360,6 +1411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.archive?.status === 'archiving' || (!boundaryMissing && Number(state.archive?.savedZipCount || 0) > 0)) {
           throw new Error('前回の状態へ戻せません');
         }
+        if (Array.isArray(state.knownMediaKeys)) previous.knownMediaKeys = state.knownMediaKeys;
         await chrome.storage.local.set({ [collectionKey('threads',handle)]:previous });
         await chrome.storage.local.remove(key);
         await restoreToolbarState();
@@ -1375,61 +1427,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'SMZ_BSKY_START_COLLECTION': {
-        await apiRecoveryPromise.catch(() => {});
-        const actor = normalizeHandle(message.handle);
-        const profile = await SMZBluesky.profile(actor);
-        const pds = await SMZBluesky.resolvePds(profile.did);
-        const key = collectionKey('bluesky', profile.handle);
-        if (blueskyJobs.has(key)) throw new Error('Blueskyの収集がまだ進行中です');
-        if (!await chrome.permissions.contains({ origins: [`${pds}/*`] })) {
-          throw new Error('元データを取得するPDSへのアクセスが許可されていません。もう一度ポップアップを開いてください');
-        }
-        await acknowledgeArchiveCompletions();
-        let state = await getCollection('bluesky', profile.handle);
-        if (state?.status === 'collecting' || state?.archive?.status === 'archiving') {
-          throw new Error('処理中のため開始できません');
-        }
-        if (state?.resumeAt && state.pauseReason === 'rate_limit' && state.resumeAt > Date.now()) {
-          throw new Error('APIのアクセス制限が終了するまで待ってください');
-        }
-        if (message.newOnly) {
-          if (!canStartNewOnlyCheck(state)) throw new Error('差分チェック前に前回のZIP保存を完了してください');
-          const previous = state;
-          state = bskyNewCollection(profile, pds);
-          state.deltaMode = true;
-          state.deltaBaselinePostId = previous.newestPostId;
-          state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
-          const baselineCounts = SMZBackup.cumulativeCounts(previous);
-          if (baselineCounts) state.deltaBaselineCounts = baselineCounts;
-          state.deltaBoundaryReached = false;
-          state.deltaVerified = false;
-          state.deltaSavedKinds = { images: false, videos: false };
-          state.preferredSaveDirectoryKey = previous.archive?.saveDirectoryKey || previous.preferredSaveDirectoryKey || null;
-          state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
-          await chrome.storage.local.set({ [previousCollectionKey('bluesky', profile.handle)]: previous });
-        } else if (message.restart || !state) {
-          state = bskyNewCollection(profile, pds);
-        } else if (state.status === 'complete') {
-          throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
-        } else {
-          state.status = 'collecting';
-          state.pauseReason = null;
-          state.resumeAt = null;
-          state.lastError = null;
-          state.did = profile.did;
-          state.pds = pds;
-          state.updatedAt = Date.now();
-        }
-        state.collectionMode = 'api';
-        const job = { did: profile.did, pds, collectionId: state.collectionId,
-          baseline: state.deltaMode ? state.deltaBaselinePostId : null,
-          cursor: state.resumeCursor || null, stopped: false, abort: new AbortController() };
-        blueskyJobs.set(key, job);
-        await setCollection(state);
-        await scheduleApiCollectionWatchdog();
-        // 収集はポップアップを閉じてもService Worker上で続く。1ページごとに進捗保存。
-        void runBlueskyCollection(profile.handle, job);
-        sendResponse({ ok: true, state });
+        await withArchiveStartLock(async () => {
+          await apiRecoveryPromise.catch(() => {});
+          const actor = normalizeHandle(message.handle);
+          const profile = await SMZBluesky.profile(actor);
+          const pds = await SMZBluesky.resolvePds(profile.did);
+          const key = collectionKey('bluesky', profile.handle);
+          if (blueskyJobs.has(key)) throw new Error('Blueskyの収集がまだ進行中です');
+          if (!await chrome.permissions.contains({ origins: [`${pds}/*`] })) {
+            throw new Error('元データを取得するPDSへのアクセスが許可されていません。もう一度ポップアップを開いてください');
+          }
+          await acknowledgeArchiveCompletions();
+          let state = await getCollection('bluesky', profile.handle);
+          if (state?.status === 'collecting' || state?.archive?.status === 'archiving') {
+            throw new Error('処理中のため開始できません');
+          }
+          if (state?.resumeAt && state.pauseReason === 'rate_limit' && state.resumeAt > Date.now()) {
+            throw new Error('APIのアクセス制限が終了するまで待ってください');
+          }
+          if (message.newOnly || message.rescan) {
+            if (!(message.rescan ? canStartRepairCheck(state) : canStartNewOnlyCheck(state))) throw new Error('差分チェック前に前回のZIP保存を完了してください');
+            const previous = state;
+            state = bskyNewCollection(profile, pds);
+            state.deltaMode = true;
+            state.deltaBaselinePostId = previous.newestPostId;
+            state.deltaBaselineCollectedAt = previous.completedAt || previous.updatedAt || null;
+            const baselineCounts = SMZBackup.cumulativeCounts(previous);
+            if (baselineCounts) state.deltaBaselineCounts = baselineCounts;
+            state.deltaBoundaryReached = false;
+            state.deltaVerified = false;
+            state.deltaSavedKinds = { images: false, videos: false };
+            state.preferredSaveDirectoryKey = previous.archive?.saveDirectoryKey || previous.preferredSaveDirectoryKey || null;
+            state.preferredSaveDirectoryName = previous.archive?.saveDirectoryName || previous.preferredSaveDirectoryName || null;
+            await inheritKnownMedia(state, previous, message.rescan);
+            await chrome.storage.local.set({ [previousCollectionKey('bluesky', profile.handle)]: previous });
+          } else if (message.restart || !state) {
+            state = bskyNewCollection(profile, pds);
+          } else if (state.status === 'complete') {
+            throw new Error('収集済みです。新規分のチェックか進捗リセットを選んでください');
+          } else {
+            state.status = 'collecting';
+            state.pauseReason = null;
+            state.resumeAt = null;
+            state.lastError = null;
+            state.did = profile.did;
+            state.pds = pds;
+            state.updatedAt = Date.now();
+          }
+          state.collectionMode = 'api';
+          const job = { did: profile.did, pds, collectionId: state.collectionId,
+            baseline: state.deltaMode && !state.repairMode ? state.deltaBaselinePostId : null,
+            cursor: state.resumeCursor || null, stopped: false, abort: new AbortController() };
+          blueskyJobs.set(key, job);
+          await setCollection(state);
+          await scheduleApiCollectionWatchdog();
+          // 収集はポップアップを閉じてもService Worker上で続く。1ページごとに進捗保存。
+          void runBlueskyCollection(profile.handle, job);
+          sendResponse({ ok: true, state });
+        });
         break;
       }
 
@@ -1458,6 +1513,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.archive?.status === 'archiving' || Number(state.archive?.savedZipCount || 0) > 0 || !previous) {
           throw new Error('前回の状態へ戻せません');
         }
+        if (Array.isArray(state.knownMediaKeys)) previous.knownMediaKeys = state.knownMediaKeys;
         await chrome.storage.local.set({ [collectionKey('bluesky', handle)]: previous });
         await chrome.storage.local.remove(key);
         await restoreToolbarState();
@@ -1473,68 +1529,73 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'SMZ_START_COLLECTION': {
-        const handle = normalizeHandle(message.handle);
-        if (!handle || !message.tabId) throw new Error('対象ユーザーまたはタブを確認できません');
+        await withArchiveStartLock(async () => {
+          const handle = normalizeHandle(message.handle);
+          if (!handle || !message.tabId) throw new Error('対象ユーザーまたはタブを確認できません');
 
-        // 新しい処理を始めた時点で、以前のZIP完了通知は確認済みとして片付ける。
-        await acknowledgeArchiveCompletions();
-        let state = await getCollection('x', handle);
-        if (message.newOnly) {
-          if (!canStartNewOnlyCheck(state)) {
-            throw new Error('差分チェックには収集完了済みの前回データが必要です。新規メディアを先にZIP保存してください');
-          }
-          const previous = state;
-          state = makeDeltaCollection(previous, message.tabId, message.collectionMode);
-          // チェック中や「新規なし」の場合も元の収集・ZIP情報を失わないよう、別キーに保持する。
-          await chrome.storage.local.set({
-            [previousCollectionKey('x', handle)]: previous,
-            [collectionKey('x', handle)]: state
-          });
-          void scheduleToolbarState(state);
-        } else if (message.restart || !state) state = makeNewCollection(handle);
-        else {
-          if (!state.collectionId) state.collectionId = makeCollectionId();
-          state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 4);
-          // v0.0.9以前から既に収集済みの作業は、アップデート後に大量件数警告を再表示しない。
-          if (state.largeWarningConfirmed == null && Number(state.counts?.total || 0) > 0) {
-            state.largeWarningConfirmed = true;
-          }
-          state.status = 'collecting';
-          state.collectionPhase = null;
-          state.pauseReason = null;
-          state.resumeAt = null;
-          state.rateLimitSimulated = false;
-          state.lastError = null;
-          state.updatedAt = Date.now();
-        }
-        state.collectionMode = message.collectionMode === 'manual' ? 'manual' : 'auto';
-        state.collectionTabId = message.tabId;
-        await clearResumeAlarm('x', handle);
-        await setCollection(state);
-        try {
-          await sendToTab(message.tabId, {
-            type: 'SMZ_START_COLLECTION',
-            handle,
-            collectionId: state.collectionId,
-            collectionMode: state.collectionMode,
-            deltaBaselinePostId: state.deltaMode ? state.deltaBaselinePostId : null,
-            restart: !!message.restart,
-            forceReload: message.forceReload !== false
-          });
-        } catch (error) {
-          if (message.newOnly) {
-            // 接続できなければ前回収集データを戻し、差分開始失敗で既存ZIP情報を隠さない。
-            const key = previousCollectionKey('x', handle);
-            const saved = await chrome.storage.local.get(key);
-            if (saved[key]) {
-              await chrome.storage.local.set({ [collectionKey('x', handle)]: saved[key] });
-              await chrome.storage.local.remove(key);
-              void restoreToolbarState();
+          // 新しい処理を始めた時点で、以前のZIP完了通知は確認済みとして片付ける。
+          await acknowledgeArchiveCompletions();
+          let state = await getCollection('x', handle);
+          if (state?.archive?.status === 'archiving') throw new Error('ZIP保存中です');
+          if (message.newOnly || message.rescan) {
+            if (!(message.rescan ? canStartRepairCheck(state) : canStartNewOnlyCheck(state))) {
+              throw new Error('差分チェックには収集完了済みの前回データが必要です。新規メディアを先にZIP保存してください');
             }
+            const previous = state;
+            state = makeDeltaCollection(previous, message.tabId, message.collectionMode);
+            await inheritKnownMedia(state, previous, message.rescan);
+            // チェック中や「新規なし」の場合も元の収集・ZIP情報を失わないよう、別キーに保持する。
+            await chrome.storage.local.set({
+              [previousCollectionKey('x', handle)]: previous,
+              [collectionKey('x', handle)]: state
+            });
+            void scheduleToolbarState(state);
+          } else if (message.restart || !state) state = makeNewCollection(handle);
+          else {
+            if (!state.collectionId) state.collectionId = makeCollectionId();
+            state.schemaVersion = Math.max(Number(state.schemaVersion) || 1, 4);
+            // v0.0.9以前から既に収集済みの作業は、アップデート後に大量件数警告を再表示しない。
+            if (state.largeWarningConfirmed == null && Number(state.counts?.total || 0) > 0) {
+              state.largeWarningConfirmed = true;
+            }
+            state.status = 'collecting';
+            state.collectionPhase = null;
+            state.pauseReason = null;
+            state.resumeAt = null;
+            state.rateLimitSimulated = false;
+            state.captureReloadRequired = false;
+            state.lastError = null;
+            state.updatedAt = Date.now();
           }
-          throw error;
-        }
-        sendResponse({ ok: true, state });
+          state.collectionMode = message.collectionMode === 'manual' ? 'manual' : 'auto';
+          state.collectionTabId = message.tabId;
+          await clearResumeAlarm('x', handle);
+          await setCollection(state);
+          try {
+            await sendToTab(message.tabId, {
+              type: 'SMZ_START_COLLECTION',
+              handle,
+              collectionId: state.collectionId,
+              collectionMode: state.collectionMode,
+              deltaBaselinePostId: state.deltaMode && !state.repairMode ? state.deltaBaselinePostId : null,
+              restart: !!message.restart,
+              forceReload: message.forceReload !== false
+            });
+          } catch (error) {
+            if (message.newOnly || message.rescan) {
+              // 接続できなければ前回収集データを戻し、差分開始失敗で既存ZIP情報を隠さない。
+              const key = previousCollectionKey('x', handle);
+              const saved = await chrome.storage.local.get(key);
+              if (saved[key]) {
+                await chrome.storage.local.set({ [collectionKey('x', handle)]: saved[key] });
+                await chrome.storage.local.remove(key);
+                void restoreToolbarState();
+              }
+            }
+            throw error;
+          }
+          sendResponse({ ok: true, state });
+        });
         break;
       }
 
@@ -1550,6 +1611,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const old = (await chrome.storage.local.get(previousKey))[previousKey];
           if (!old || old.status !== 'complete') throw new Error('前回の収集状態を復元できません');
+          if (Array.isArray(current.knownMediaKeys)) old.knownMediaKeys = current.knownMediaKeys;
           await chrome.storage.local.set({ [collectionKey('x', handle)]: old });
           await chrome.storage.local.remove(previousKey);
           void restoreToolbarState();
@@ -1582,6 +1644,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
 
+      case 'SMZ_X_CAPTURE_DIAGNOSTIC':
+      case 'SMZ_X_MEDIA_DIAGNOSTIC': {
+        const handle=normalizeHandle(message.handle);
+        const isCapture=message.type==='SMZ_X_CAPTURE_DIAGNOSTIC';
+        const diagnostic=isCapture?globalThis.SMZXMediaDebug?.normalizeCapture(message.diagnostic):globalThis.SMZXMediaDebug?.normalize(message.diagnostic);
+        if(sender.id!==chrome.runtime.id || !sender.tab?.id || xHandleFromUrl(sender.url)!==handle ||
+           !/^https:\/\/(?:x|twitter)\.com\/[^/]+\/media(?:[/?#]|$)/i.test(String(sender.url||''))) throw new Error('収集対象のXタブから操作してください');
+        const state=(await chrome.storage.local.get(collectionKey('x',handle)))[collectionKey('x',handle)];
+        if(!diagnostic || !state || state.status!=='collecting' || state.collectionId!==message.collectionId || state.collectionTabId!==sender.tab.id) {
+          sendResponse({ok:true,discarded:true});break;
+        }
+        globalThis.SMZDirectoryTrace?.emit(isCapture?`x.capture.${diagnostic.phase}`:'x.media.response',{...diagnostic,platform:'x',account:handle,collectionId:state.collectionId,tabId:sender.tab.id});
+        sendResponse({ok:true});break;
+      }
+
+      case 'SMZ_X_DOM_POSTS': {
+        const handle = normalizeHandle(message.handle), state = await getCollection('x', handle);
+        if (!state || state.status !== 'collecting' || state.collectionId !== message.collectionId || sender.tab?.id !== state.collectionTabId) {
+          sendResponse({ok:false}); break;
+        }
+        const ids = [...new Set((Array.isArray(message.postIds) ? message.postIds : []).slice(0,200).filter(id=>typeof id==='string' && /^\d{1,24}$/.test(id)))];
+        const known = new Set(state.items.map(item=>item.postId));
+        for (const key of state.knownMediaKeys || []) known.add(key.slice(0,key.lastIndexOf('_')));
+        const missing = ids.filter(id=>!known.has(id));
+        globalThis.SMZDirectoryTrace?.emit('x.dom.compare', {platform:'x',account:handle,collectionId:state.collectionId,
+          receivedCount:ids.length,collectedCount:ids.length-missing.length,ignoredCount:missing.length,postId:missing[0] || null});
+        sendResponse({ok:true}); break;
+      }
+
       case 'SMZ_ADD_MEDIA': {
         const handle = normalizeHandle(message.handle);
         const items = Array.isArray(message.items) ? message.items : [];
@@ -1590,16 +1681,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!state || state.status !== 'collecting' ||
               (state.collectionId && message.collectionId !== state.collectionId) ||
               (sender.tab?.id && state.collectionTabId && sender.tab.id !== state.collectionTabId)) {
-            return { state, addedCount: 0 };
+            return { state, addedCount: 0, accepted: false };
           }
-          const existing = new Set(state.items.map((item) => item.key));
-          const relevantBoundaryBatch = state.deltaMode && /(?:\/|\b)UserMedia(?:\b|\/)/i.test(String(message.requestUrl || ''));
+          const existing = new Set([...state.items.map((item) => item.key), ...(state.knownMediaKeys || [])]);
+          const relevantBoundaryBatch = state.deltaMode && !state.repairMode && /(?:\/|\b)UserMedia(?:\b|\/)/i.test(String(message.requestUrl || ''));
           const olderIds = new Set(state.deltaOlderPostIds || []);
           const priorOlderCount = olderIds.size;
           let addedCount = 0;
           const addedItems = [];
           for (const item of items) {
-            if (state.deltaMode) {
+            if (state.deltaMode && !state.repairMode) {
               if (!validPostId(item?.postId)) continue;
               const relative = compareNumericPostIds(item.postId, state.deltaBaselinePostId);
               if (relative <= 0) {
@@ -1633,7 +1724,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.updatedAt = Date.now();
             await setCollection(state);
           }
-          return { state, addedCount, boundaryReached: state.deltaMode && state.deltaBoundaryReached === true };
+          try {
+            if(globalThis.SMZDirectoryTrace && globalThis.SMZXMediaDebug) {
+              for(const row of SMZXMediaDebug.persisted(state,items,addedItems)) {
+                SMZDirectoryTrace.emit('x.media.persisted',{...row,platform:'x',account:handle,collectionId:state.collectionId});
+              }
+            }
+          } catch {}
+          return { state, addedCount, accepted: true, boundaryReached: state.deltaMode && state.deltaBoundaryReached === true };
         });
         sendResponse({ ok: true, ...result });
         break;
@@ -1664,10 +1762,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             tabId !== current.collectionTabId) {
           throw new Error('手動収集の対象タブまたは処理状態が一致しません');
         }
-        if (current.deltaMode && !current.deltaBoundaryReached) {
+        if (current.deltaMode && !current.repairMode && !current.deltaBoundaryReached) {
           throw new Error('前回の投稿位置にまだ到達していません。続きをスクロールするか「停止」で一時保存してください');
         }
-        if (Number(current.counts?.total || 0) < 1 && !(current.deltaMode && current.deltaBoundaryReached)) {
+        if (Number(current.counts?.total || 0) < 1 && !(current.deltaMode && (current.deltaBoundaryReached || current.repairMode))) {
           throw new Error('まだメディアがありません。Xの /media を下へスクロールしてください');
         }
         const tab = await chrome.tabs.get(tabId);
@@ -1753,7 +1851,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             handle,
             collectionId: state.collectionId,
             collectionMode: state.collectionMode || 'auto',
-            deltaBaselinePostId: state.deltaBaselinePostId || null,
+            deltaBaselinePostId: state.repairMode ? null : state.deltaBaselinePostId || null,
             automatic: false,
             skipLargeWarning: true
           });
@@ -1825,6 +1923,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           current.status = 'paused';
           current.collectionPhase = null;
           current.pauseReason = 'error';
+          current.captureReloadRequired = message.reloadRequired === true;
           current.lastError = String(message.error || '不明なエラー');
           current.updatedAt = Date.now();
           await setCollection(current);

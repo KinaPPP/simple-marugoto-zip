@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>保存先の診断ログ</title>
+  <title>保存先・X収集の診断ログ</title>
   <style>
     body{max-width:1100px;margin:32px auto;padding:0 20px;font:14px/1.6 system-ui,sans-serif;color:#202124}
     h1{font-size:24px}h2{font-size:18px}button{padding:8px 15px;margin:4px 8px 4px 0;cursor:pointer}
@@ -12,12 +12,16 @@
   </style>
 </head>
 <body>
-  <h1>保存先の診断ログ</h1>
+  <h1>保存先・X収集の診断ログ</h1>
   <p class="note"><strong>再現中は、このログ画面と設定画面を閉じてください。</strong>通常タブを開くこと自体が権限の寿命へ影響する可能性があります。再現後にこの画面を開き、ログを書き出してください。</p>
-  <p>最新400件を拡張内に記録します。フォルダ名・任意の識別名・アカウント名・ZIPファイル名を含みます。画像、投稿本文、メディアURL、トークン、Cookieは記録対象にしません。</p>
+  <p>最新400件を拡張内に記録します。フォルダ名・任意の識別名・アカウント名・投稿ID・ZIPファイル名・メディア件数を含みます。画像、投稿本文、メディアURL、トークン、Cookieは記録対象にしません。共有前に内容を確認してください。</p>
+  <p>X収集の診断は、主に5件以上の画像・動画を含む応答を記録します。以下の一覧で通信の件数と実際の収集件数を比較できます。「保存確認済み」は保存済みキーの記録があるものだけを表示し、実際のZIP内のファイルも確認してください。</p>
   <p>直接保存用のAPIからドライブ付きのフルパスは取得できません。同名フォルダは、選択時に入力した「診断用の識別名」と保存先キーで区別してください。</p>
   <button id="refresh">更新</button><button id="export">診断ログをJSONで保存</button><button id="clear">診断ログだけを消去</button>
   <p id="status" role="status"></p>
+  <h2>Xの複数メディア投稿（アカウントごとに最大100投稿）</h2>
+  <p id="xStatus"></p>
+  <table><thead><tr><th>対象・投稿ID</th><th>X通信の最大件数</th><th>収集済み（画像／動画）</th><th>収集した番号</th><th>保存確認済み／番号</th></tr></thead><tbody id="xPosts"></tbody></table>
   <h2>現在Chromeに保存されている設定</h2>
   <table><thead><tr><th>対象</th><th>ZIP側の保存先</th><th>希望する保存先</th><th>状態・進捗</th></tr></thead><tbody id="current"></tbody></table>
   <h2>直近の記録（新しい順・最大100件表示）</h2>

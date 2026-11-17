@@ -127,7 +127,7 @@ function send(message, url='chrome-extension://smz-test/popup/popup.html') {
   assert.doesNotMatch(changeHandler,/setNotice\(/,'save-directory success/cancel/error must not use the floating notice');
   assert.match(css,/\.save-dir-change/);
   assert.match(css,/status-feedback-error/);
-  assert.match(html,/v1\.3\.13/);
+  assert.match(html,/v1\.3\.15/);
 
   const tabUrl = 'chrome-extension://smz-test/archive/directory.html?platform=x&handle=demo';
   const commit = {type:'SMZ_COMMIT_SAVE_DIRECTORY',platform:'x',handle:'demo',saveDirectoryKey:oldDirKey,candidateKey:'archive-directory:change-candidate'};
